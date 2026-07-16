@@ -1571,6 +1571,13 @@ fn import_one(conn: &Connection, grab: &PendingGrab, content_path: &Path) -> Res
     std::fs::create_dir_all(root_folder)?;
     let dest = Path::new(root_folder).join(&filename);
 
+    // Set below (to the renamed-aside stale file's path) only when this
+    // import is an upgrade over an existing, worse-scoring file — see the
+    // `dest.exists()` branch. Used to restore the original on any failure
+    // between here and the replacement being confirmed on disk, and to
+    // gate the deferred cleanup (old row + old file) once it succeeds.
+    let mut old_sibling: Option<PathBuf> = None;
+
     // The deterministic filename means a second release for the same
     // episode/movie collides on this exact path. `link_or_copy_file`'s copy
     // fallback renames into place, which *silently overwrites* an existing
@@ -1620,39 +1627,59 @@ fn import_one(conn: &Connection, grab: &PendingGrab, content_path: &Path) -> Res
             }
             return Ok(ImportOutcome::SkippedAlreadyHaveBetter);
         }
-        // The new file scores strictly better than what's currently there —
-        // remove the stale file and its tracking row before placing the
-        // replacement, rather than letting `link_or_copy_file`'s copy
-        // fallback silently overwrite it in place. This matters for two
-        // reasons: it keeps exactly one `episode_file` row per episode (an
-        // old row left behind plus the fresh `INSERT` below would otherwise
-        // leave a duplicate — the same bug class found live in the
-        // Dr.STONE/Battlestar Galactica rows), and it lets the primary
-        // hardlink path actually succeed (`std::fs::hard_link` fails
-        // outright if the destination already exists), so an upgrade is a
-        // cheap hardlink swap instead of an unnecessary full copy.
-        conn.execute(
-            "DELETE FROM episode_file WHERE path = ?1",
-            params![dest.to_string_lossy()],
-        )?;
-        std::fs::remove_file(&dest).ok();
+        // The new file scores strictly better than what's currently there.
+        // Move the stale file sideways to a `.old` sibling — rather than
+        // deleting it and its tracking row outright — so the replacement is
+        // placed and confirmed *before* the original is actually given up.
+        // A `rename` (not a delete) still frees up `dest` for the primary
+        // hardlink path (`std::fs::hard_link` fails outright if the
+        // destination already exists), so an upgrade is still a cheap
+        // hardlink swap in the common case; it just also means that if the
+        // free-space check or `link_or_copy_file` below fails (I/O error,
+        // dest dir vanished, disk full), the original file gets moved back
+        // into place instead of being gone for good. The DB row is left
+        // alone until the replacement is confirmed on disk, for the same
+        // reason.
+        old_sibling = Some(PathBuf::from(format!("{}.old", dest.display())));
+        std::fs::rename(&dest, old_sibling.as_ref().unwrap())?;
     }
 
     let needed_bytes = std::fs::metadata(&working_path)?.len();
     if insufficient_space(Path::new(root_folder), needed_bytes)? {
+        if let Some(old_sibling) = &old_sibling {
+            std::fs::rename(old_sibling, &dest).ok();
+        }
         anyhow::bail!(
             "not enough free space at {root_folder} for {needed_bytes} bytes (source: {})",
             working_path.display()
         );
     }
 
-    link_or_copy_file(&working_path, &dest)?;
+    if let Err(err) = link_or_copy_file(&working_path, &dest) {
+        // Restore the original file rather than leaving the user with
+        // neither the old file nor the new one — this is the exact failure
+        // mode a `DELETE`-then-place ordering used to leave unrecoverable.
+        if let Some(old_sibling) = &old_sibling {
+            std::fs::rename(old_sibling, &dest).ok();
+        }
+        return Err(err);
+    }
     if remuxed {
         // `working_path` here is the scratch remux output, not qBittorrent's
         // original content file (which was already removed above, in the
         // remux branch, to make way for it) — nothing else reads it, so
         // unlike the plain-import case there's no seeding reason to keep it.
         std::fs::remove_file(&working_path).ok();
+    }
+
+    // The replacement is confirmed in place on disk — only now is it safe
+    // to drop the old tracking row and the renamed-aside original.
+    if let Some(old_sibling) = old_sibling {
+        conn.execute(
+            "DELETE FROM episode_file WHERE path = ?1",
+            params![dest.to_string_lossy()],
+        )?;
+        std::fs::remove_file(&old_sibling).ok();
     }
 
     let size_bytes = std::fs::metadata(&dest)?.len();
@@ -1927,6 +1954,7 @@ fn import_season_pack_file(
     // release for the same episode (here, from a *different* pack or a
     // single-episode grab) must not silently overwrite a better file
     // already in place.
+    let mut old_sibling: Option<PathBuf> = None;
     if dest.exists() {
         let existing_best: Option<f32> = conn.query_row(
             "SELECT MAX(score) FROM release WHERE status = 'imported' AND id != ?1 AND episode_id = ?2",
@@ -1936,27 +1964,42 @@ fn import_season_pack_file(
         if existing_best.is_some_and(|best| best >= release_score) {
             return Ok(PackFileOutcome::SkippedAlreadyHaveBetter);
         }
-        // This episode's file is being upgraded — clear the stale row and
-        // file first so the hardlink below is a real hardlink swap rather
-        // than a copy-fallback overwrite, and so no duplicate episode_file
-        // row survives. See import_one's matching comment for the fuller
-        // reasoning.
-        conn.execute(
-            "DELETE FROM episode_file WHERE path = ?1",
-            params![dest.to_string_lossy()],
-        )?;
-        std::fs::remove_file(&dest).ok();
+        // This episode's file is being upgraded. Move the stale file aside
+        // to a `.old` sibling rather than deleting it (and its row) outright
+        // — `dest` is still free for the hardlink fast path, but the
+        // original survives on disk until the replacement is confirmed in
+        // place, so a failed free-space check or `link_or_copy_file` below
+        // can't lose the file. See import_one's matching comment for the
+        // fuller reasoning; this is the same fix applied there.
+        old_sibling = Some(PathBuf::from(format!("{}.old", dest.display())));
+        std::fs::rename(&dest, old_sibling.as_ref().unwrap())?;
     }
 
     let needed_bytes = std::fs::metadata(source_path)?.len();
     if insufficient_space(Path::new(root_folder), needed_bytes)? {
+        if let Some(old_sibling) = &old_sibling {
+            std::fs::rename(old_sibling, &dest).ok();
+        }
         anyhow::bail!(
             "not enough free space at {root_folder} for {needed_bytes} bytes (source: {})",
             source_path.display()
         );
     }
 
-    link_or_copy_file(source_path, &dest)?;
+    if let Err(err) = link_or_copy_file(source_path, &dest) {
+        if let Some(old_sibling) = &old_sibling {
+            std::fs::rename(old_sibling, &dest).ok();
+        }
+        return Err(err);
+    }
+
+    if let Some(old_sibling) = old_sibling {
+        conn.execute(
+            "DELETE FROM episode_file WHERE path = ?1",
+            params![dest.to_string_lossy()],
+        )?;
+        std::fs::remove_file(&old_sibling).ok();
+    }
 
     let size_bytes = std::fs::metadata(&dest)?.len();
     conn.execute(
