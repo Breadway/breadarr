@@ -1,0 +1,99 @@
+# Copy to ~/.config/breadarr/breadarrd.toml and fill in the empty values.
+# Every field has a sensible default (see breadarr-shared/src/config.rs) —
+# this file lists them explicitly for reference, not because all are required.
+
+[daemon]
+log_level = "info"
+listen_addr = "127.0.0.1:7879"
+db_path = "~/.local/share/breadarr/breadarr.db"
+# Embedding model for title matching — downloaded automatically on first
+# run if not already present (~90MB, one-time).
+model_dir = "~/.cache/breadarr/models/all-MiniLM-L6-v2"
+# Empty (default) means no auth at all. Set this if listen_addr is ever
+# changed to bind non-loopback (e.g. so a TUI on another host on the same
+# tailnet can reach it) — otherwise that's unauthenticated add/delete/search
+# access to anyone who can reach the port. /health is always exempt.
+api_token = ""
+
+[qbit]
+base_url = "http://127.0.0.1:8090"
+username = ""
+password = ""
+category = "breadarr"
+# Only needed if qBittorrent runs in a container (its own downloads mounted
+# at some internal prefix) while breadarr runs natively on the same host —
+# translates qBittorrent's reported paths into ones breadarr can open.
+# Leave both empty if qBittorrent's reported paths are already host paths.
+container_downloads_path = ""
+host_downloads_path = ""
+
+[jellyfin]
+base_url = "http://127.0.0.1:8096"
+api_key = ""
+
+[notifications]
+# Push notifications for things that would otherwise sit invisible until
+# the TUI is next opened: releases needing manual confirmation, a run of
+# import failures, the search loop halting. Empty (default) disables this
+# entirely. POSTs {"title", "message"} JSON — Gotify's own message API
+# accepts this directly (e.g. "http://127.0.0.1:5600/message?token=...");
+# most other self-hosted webhook receivers accept the same shape.
+webhook_url = ""
+
+[tvdb]
+# https://thetvdb.com/dashboard/account/apikeys — v4 key, "Fan/Personal" tier
+api_key = ""
+
+[tmdb]
+# https://www.themoviedb.org/settings/api — "API Read Access Token (v4 auth)",
+# not the shorter v3 "API Key"
+bearer_token = ""
+
+[library]
+# Default root folder for shows added via the TUI's "Add Show" flow.
+default_root_folder = "~/breadarr-library"
+
+[sources]
+# nyaa's English-translated anime category — the daemon polls this
+# automatically and grabs anything matching a monitored, missing episode.
+nyaa_rss_url = "https://nyaa.si/?page=rss&c=1_2"
+grab_poll_interval_secs = 300
+import_poll_interval_secs = 60
+# Search-driven acquisition (movies + non-anime TV via 1337x, anime movies
+# via nyaa's search mode) — unlike the nyaa RSS feed watch above, this
+# actively queries a Cloudflare-fronted service with a ban history, so keep
+# the budget conservative. `search_enabled = false` is the kill switch; a
+# restart resets all in-memory mirror cooldown/backoff state, so this is the
+# only reliable way to keep it off across restarts.
+search_poll_interval_secs = 1800
+search_budget_per_cycle = 5
+search_enabled = true
+# Upgrade-search — periodically re-checks episodes/movies that already have
+# a file, in case a better release now exists (repacks/propers always
+# supersede; anything else needs to beat the current file's score by at
+# least upgrade_min_score_gain to avoid re-grabbing over marginal deltas).
+# Much longer interval than search_poll_interval_secs since there's no
+# urgency once content is already satisfied.
+upgrade_enabled = true
+upgrade_poll_interval_secs = 21600
+upgrade_budget_per_cycle = 3
+upgrade_min_score_gain = 5.0
+# 1337x's main domain bans IPs at the Cloudflare WAF level after bursts of
+# automated traffic; these community mirrors are round-robined (not just
+# tried in a fixed fallback order), with a failing mirror demoted into a
+# cooldown rather than re-probed on the very next search.
+torrent_1337x_mirrors = [
+  "https://13377x.info",
+  "https://13377x.email",
+  "https://1337xto.info",
+  "https://1337x.maskbay.info",
+  "https://1337x.ninjaproxy.live",
+  "https://1337x.proxyhive.pro",
+  "https://1337x.torproxy.live",
+  "https://1337x.unblockit.world",
+  "https://1337x.unblockpirate.xyz",
+  "https://1337x.unblockshark.info",
+  "https://1337x.unblocktorrent.click",
+  "https://1337x.unblocktorrent.info",
+  "https://1337x.unblocktor.xyz",
+]

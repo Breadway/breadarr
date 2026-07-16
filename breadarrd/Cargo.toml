@@ -1,0 +1,25 @@
+[package]
+name = "breadarrd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+breadarr-shared.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum.workspace = true
+serde.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+quick-xml.workspace = true
+async-trait.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+ort.workspace = true
+tokenizers.workspace = true
+scraper.workspace = true
+chrono.workspace = true
+fastrand.workspace = true
+nix.workspace = true
