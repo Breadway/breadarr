@@ -16,6 +16,13 @@ const TOKENIZER_URL: &str =
 /// Downloads the embedding model into `model_dir` if it isn't already
 /// there — keeps setup to "run the daemon," no separate fetch step, in
 /// keeping with the project's minimal-setup goal.
+///
+/// `bread_onnx::download::ensure_file` is sync/blocking (`ureq`, matching
+/// this workspace's `bakery` download convention) — this used to be a
+/// `reqwest`-based async implementation local to this crate, genuinely
+/// duplicating breadmill's own sync/`ureq` downloader. Since this fn is
+/// called from an async context, each call is dispatched via
+/// `spawn_blocking` rather than blocking the async runtime directly.
 pub async fn ensure_model(model_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(model_dir)
         .with_context(|| format!("failed to create {}", model_dir.display()))?;
@@ -25,28 +32,19 @@ pub async fn ensure_model(model_dir: &Path) -> Result<(PathBuf, PathBuf)> {
 
     if !model_path.exists() {
         tracing::info!("downloading title-matching model (~90MB, one-time)");
-        download(MODEL_URL, &model_path).await?;
+        download(MODEL_URL, model_path.clone()).await?;
     }
     if !tokenizer_path.exists() {
-        download(TOKENIZER_URL, &tokenizer_path).await?;
+        download(TOKENIZER_URL, tokenizer_path.clone()).await?;
     }
 
     Ok((model_path, tokenizer_path))
 }
 
-async fn download(url: &str, dest: &Path) -> Result<()> {
-    let bytes = reqwest::get(url)
+async fn download(url: &'static str, dest: PathBuf) -> Result<()> {
+    tokio::task::spawn_blocking(move || bread_onnx::download::ensure_file(url, &dest, None))
         .await
-        .with_context(|| format!("failed to download {url}"))?
-        .error_for_status()
-        .with_context(|| format!("{url} returned an error status"))?
-        .bytes()
-        .await
-        .with_context(|| format!("failed to read response body from {url}"))?;
-    let tmp = dest.with_extension("part");
-    std::fs::write(&tmp, &bytes).with_context(|| format!("failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, dest)
-        .with_context(|| format!("failed to finalize {}", dest.display()))?;
+        .context("download task panicked")??;
     Ok(())
 }
 
