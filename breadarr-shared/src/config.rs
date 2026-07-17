@@ -314,10 +314,16 @@ fn config_path() -> PathBuf {
 }
 
 fn expand_home(input: &str) -> PathBuf {
+    // Was: falls through to `PathBuf::from(input)` — a literal, unexpanded
+    // "~/..." string — whenever the `HOME` env var itself isn't set.
+    // PathBuf/std::fs never expand `~`, so that fallback silently produced
+    // a path relative to the current working directory instead of the
+    // user's actual home. Same bug class as breadclip-core/breadpad-shared/
+    // breadmon (see bread_utils::xdg's doc comment); bread_utils::xdg::home_dir
+    // resolves a real home directory (falling back to `/root`, never a
+    // literal tilde) before this ever needs to fall back at all.
     if let Some(stripped) = input.strip_prefix("~/") {
-        if let Ok(home) = env::var("HOME") {
-            return Path::new(&home).join(stripped);
-        }
+        return bread_utils::xdg::home_dir().join(stripped);
     }
     PathBuf::from(input)
 }

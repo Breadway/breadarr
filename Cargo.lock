@@ -203,6 +203,7 @@ name = "breadarr-shared"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bread-utils",
  "chrono",
  "reqwest",
  "serde",
