@@ -9,5 +9,4 @@ anyhow.workspace = true
 toml.workspace = true
 reqwest.workspace = true
 chrono.workspace = true
-# TODO(owner): switch to tag-pinned git dependency once bread-utils is merged and tagged, matching the bread-theme pattern
-bread-utils = { path = "../../bread-ecosystem/bread-utils" }
+bread-utils = { git = "https://git.breadway.dev/Breadway/bread-ecosystem", tag = "v0.3.0", }
