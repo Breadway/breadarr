@@ -218,6 +218,15 @@ pub(crate) fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// TV episode files live under a `Season NN` subfolder of the show's
+/// `root_folder`, matching the layout Jellyfin/Sonarr/library-scan already
+/// use — episodes imported flat into the show root previously left new
+/// grabs sitting alongside, rather than inside, the season structure that
+/// pre-existing library files were organized into.
+pub(crate) fn season_dir(root_folder: &str, season_number: u32) -> PathBuf {
+    Path::new(root_folder).join(format!("Season {season_number:02}"))
+}
+
 pub(crate) fn deterministic_filename(
     series_title: &str,
     season: u32,
@@ -1533,7 +1542,7 @@ fn import_one(conn: &Connection, grab: &PendingGrab, content_path: &Path) -> Res
         // clean import below, same as an already-English-default file.
     }
 
-    let (root_folder, filename, episode_id) = match grab {
+    let (dest_dir, filename, episode_id) = match grab {
         PendingGrab::Episode {
             series_title,
             season_number,
@@ -1550,7 +1559,8 @@ fn import_one(conn: &Connection, grab: &PendingGrab, content_path: &Path) -> Res
                 episode_title.as_deref(),
                 &ext,
             );
-            (root_folder.as_str(), filename, Some(*episode_id))
+            let dest_dir = season_dir(root_folder, *season_number);
+            (dest_dir, filename, Some(*episode_id))
         }
         PendingGrab::Movie {
             title,
@@ -1559,7 +1569,7 @@ fn import_one(conn: &Connection, grab: &PendingGrab, content_path: &Path) -> Res
             ..
         } => {
             let filename = deterministic_movie_filename(title, *year, &ext);
-            (root_folder.as_str(), filename, None)
+            (PathBuf::from(root_folder), filename, None)
         }
         // `process_pending_grabs` dispatches `SeasonPack` to
         // `import_season_pack` and never reaches this function with one.
@@ -1568,8 +1578,8 @@ fn import_one(conn: &Connection, grab: &PendingGrab, content_path: &Path) -> Res
         ),
     };
 
-    std::fs::create_dir_all(root_folder)?;
-    let dest = Path::new(root_folder).join(&filename);
+    std::fs::create_dir_all(&dest_dir)?;
+    let dest = dest_dir.join(&filename);
 
     // Set below (to the renamed-aside stale file's path) only when this
     // import is an upgrade over an existing, worse-scoring file — see the
@@ -1645,12 +1655,13 @@ fn import_one(conn: &Connection, grab: &PendingGrab, content_path: &Path) -> Res
     }
 
     let needed_bytes = std::fs::metadata(&working_path)?.len();
-    if insufficient_space(Path::new(root_folder), needed_bytes)? {
+    if insufficient_space(&dest_dir, needed_bytes)? {
         if let Some(old_sibling) = &old_sibling {
             std::fs::rename(old_sibling, &dest).ok();
         }
         anyhow::bail!(
-            "not enough free space at {root_folder} for {needed_bytes} bytes (source: {})",
+            "not enough free space at {} for {needed_bytes} bytes (source: {})",
+            dest_dir.display(),
             working_path.display()
         );
     }
@@ -1948,7 +1959,9 @@ fn import_season_pack_file(
         episode_title.as_deref(),
         &ext,
     );
-    let dest = Path::new(root_folder).join(&filename);
+    let dest_dir = season_dir(root_folder, season_number);
+    std::fs::create_dir_all(&dest_dir)?;
+    let dest = dest_dir.join(&filename);
 
     // Same reasoning as import_one's own dest-collision check: a second
     // release for the same episode (here, from a *different* pack or a
@@ -1976,12 +1989,13 @@ fn import_season_pack_file(
     }
 
     let needed_bytes = std::fs::metadata(source_path)?.len();
-    if insufficient_space(Path::new(root_folder), needed_bytes)? {
+    if insufficient_space(&dest_dir, needed_bytes)? {
         if let Some(old_sibling) = &old_sibling {
             std::fs::rename(old_sibling, &dest).ok();
         }
         anyhow::bail!(
-            "not enough free space at {root_folder} for {needed_bytes} bytes (source: {})",
+            "not enough free space at {} for {needed_bytes} bytes (source: {})",
+            dest_dir.display(),
             source_path.display()
         );
     }
@@ -3151,6 +3165,78 @@ mod tests {
     }
 
     #[test]
+    fn import_one_places_a_single_episode_grab_under_its_season_subfolder() {
+        // Regression: a real single-episode grab (Mushoku Tensei S03E02/E03,
+        // not part of a season pack) landed flat in the show's root_folder
+        // instead of alongside the rest of the season's already-organized
+        // files in `Season 03/`, once the pre-existing library-scanned
+        // structure had nothing left to mask it.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_item (id, kind, title, year, monitored, quality_profile_id, root_folder)
+             VALUES (1, 'series', 'Some Show', 2021, 1, 1, '/tmp')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source (id, name, kind, base_url) VALUES (1, 'tpb', 'scrape', 'http://x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file)
+             VALUES (1, 1, 3, 2, 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO release (id, media_item_id, episode_id, raw_title, source_id, guid, status, torrent_hash, grabbed_at)
+             VALUES (1, 1, 1, 'Some Show S03E02 1080p', 1, 'guid-1', 'grabbed', 'deadbeef', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-single-episode-season-dir-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest_root = dir.join("library");
+        std::fs::create_dir_all(&dest_root).unwrap();
+        let content = dir.join("Some.Show.S03E02.1080p.mp4");
+        std::fs::write(&content, b"fake episode data").unwrap();
+
+        let grab = PendingGrab::Episode {
+            release_id: 1,
+            episode_id: 1,
+            media_item_id: 1,
+            torrent_hash: "deadbeef".to_string(),
+            series_title: "Some Show".to_string(),
+            season_number: 3,
+            episode_number: 2,
+            episode_title: None,
+            root_folder: dest_root.to_string_lossy().to_string(),
+        };
+
+        let outcome = import_one(&conn, &grab, &content).unwrap();
+        assert!(matches!(outcome, ImportOutcome::Imported { .. }));
+
+        let dest = dest_root.join("Season 03").join("Some Show - S03E02.mp4");
+        assert!(
+            dest.exists(),
+            "expected {} to exist under the season subfolder",
+            dest.display()
+        );
+        assert!(
+            !dest_root.join("Some Show - S03E02.mp4").exists(),
+            "must not also land flat in the show's root folder"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn import_one_flags_quality_when_the_real_file_is_under_1080p() {
         // Mirrors a real production case: a release whose title carries no
         // resolution tag at all turned out, once ffprobed, to actually be
@@ -3604,9 +3690,18 @@ mod tests {
             .unwrap();
         assert_eq!(status, "imported");
 
-        assert!(dest_root.join("Some Show - S01E01.mkv").exists());
-        assert!(dest_root.join("Some Show - S01E02.mkv").exists());
-        assert!(dest_root.join("Some Show - S01E03.mkv").exists());
+        assert!(dest_root
+            .join("Season 01")
+            .join("Some Show - S01E01.mkv")
+            .exists());
+        assert!(dest_root
+            .join("Season 01")
+            .join("Some Show - S01E02.mkv")
+            .exists());
+        assert!(dest_root
+            .join("Season 01")
+            .join("Some Show - S01E03.mkv")
+            .exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3623,7 +3718,8 @@ mod tests {
         std::fs::write(pack_dir.join("Show.S01E01.mkv"), b"new e01").unwrap();
         std::fs::write(pack_dir.join("Show.S01E02.mkv"), b"new e02").unwrap();
         let dest_root = dir.join("library");
-        std::fs::create_dir_all(&dest_root).unwrap();
+        let season_dir = dest_root.join("Season 01");
+        std::fs::create_dir_all(&season_dir).unwrap();
 
         // Episode 1 already has a higher-scoring imported release.
         conn.execute(
@@ -3632,7 +3728,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let existing = dest_root.join("Some Show - S01E01.mkv");
+        let existing = season_dir.join("Some Show - S01E01.mkv");
         std::fs::write(&existing, b"already-better e01").unwrap();
         conn.execute(
             "INSERT INTO episode_file (episode_id, media_item_id, path, size_bytes, subtitle_status)
@@ -3659,7 +3755,7 @@ mod tests {
             b"already-better e01",
             "episode 1's better file must survive untouched"
         );
-        assert!(dest_root.join("Some Show - S01E02.mkv").exists());
+        assert!(season_dir.join("Some Show - S01E02.mkv").exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

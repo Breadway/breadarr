@@ -188,15 +188,28 @@ impl TitleMatcher {
     }
 }
 
+/// Grammatical filler words that show up across countless unrelated titles
+/// and carry no discriminating signal on their own — English articles and
+/// the short romaji particles ubiquitous in Japanese titles ("X no Y", "X ga
+/// Y", ...). Without this, two completely unrelated shows sharing nothing
+/// but e.g. "no" register as real overlap and slip past `MIN_TOKEN_OVERLAP`
+/// (verified live: "Yomi no Tsugai" / "Kami no Shizuku" / "Saijo no Osewa"
+/// all cleared the guard against "Kimetsu no Yaiba" on "no" alone).
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "of", "to", "and", "no", "wa", "wo", "ga", "ni", "de", "ha", "he", "da",
+];
+
 /// Word-level overlap between `a` and `b`, as a fraction of the *shorter*
 /// title's word count — so a short alias fully contained in a longer title
 /// (or vice versa) still scores 1.0, rather than being penalized by length
-/// mismatch. Case-insensitive, splits on non-alphanumeric runs.
+/// mismatch. Case-insensitive, splits on non-alphanumeric runs, and ignores
+/// `STOPWORDS` so shared filler words don't count as real overlap.
 fn token_overlap_ratio(a: &str, b: &str) -> f32 {
     let tokenize = |s: &str| -> std::collections::HashSet<String> {
         s.split(|c: char| !c.is_alphanumeric())
             .filter(|t| !t.is_empty())
             .map(|t| t.to_lowercase())
+            .filter(|t| !STOPWORDS.contains(&t.as_str()))
             .collect()
     };
     let ta = tokenize(a);
@@ -272,5 +285,25 @@ mod tests {
     #[test]
     fn empty_input_has_zero_overlap() {
         assert_eq!(token_overlap_ratio("", "Mushoku Tensei"), 0.0);
+    }
+
+    #[test]
+    fn shared_particle_alone_is_not_real_overlap() {
+        // The bug found live in the review queue: unrelated titles sharing
+        // only the Japanese particle "no" scored a nonzero ratio and slipped
+        // past MIN_TOKEN_OVERLAP, flooding review with false matches against
+        // "Demon Slayer" (Kimetsu no Yaiba).
+        assert_eq!(
+            token_overlap_ratio("Yomi no Tsugai", "Kimetsu no Yaiba"),
+            0.0
+        );
+        assert_eq!(
+            token_overlap_ratio("Kami no Shizuku", "Kimetsu no Yaiba"),
+            0.0
+        );
+        assert_eq!(
+            token_overlap_ratio("Saijo no Osewa", "Kimetsu no Yaiba"),
+            0.0
+        );
     }
 }
