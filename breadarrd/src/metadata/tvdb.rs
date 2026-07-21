@@ -110,8 +110,6 @@ impl TvdbClient {
     }
 
     pub async fn episodes(&self, series_id: &str) -> Result<Vec<EpisodeInfo>> {
-        let token = self.token().await?;
-
         #[derive(Deserialize)]
         struct EpisodesResponse {
             data: EpisodesData,
@@ -131,20 +129,47 @@ impl TvdbClient {
             aired: Option<String>,
         }
 
-        let resp: EpisodesResponse = self
-            .client
-            .get(format!(
-                "https://api4.thetvdb.com/v4/series/{series_id}/episodes/default"
-            ))
-            .bearer_auth(token)
-            .send()
-            .await
-            .context("tvdb episodes request failed")?
-            .error_for_status()
-            .context("tvdb episodes returned an error status")?
-            .json()
-            .await
-            .context("tvdb episodes response was not valid JSON")?;
+        // TVDB's plain `/episodes/default` returns names in the show's
+        // original airing language — for a lot of anime that's Japanese,
+        // with no English name at all (verified live: entire shows came
+        // back Japanese-only). `/episodes/default/eng` is the same episode
+        // list (same numbering/air-date fields) but with TVDB's own
+        // crowd-sourced English translation substituted in for `name`
+        // wherever one exists — a real translation, not a guess, so it's
+        // tried first and only falls back to the original-language
+        // endpoint if TVDB has no English data for this show at all.
+        let token = self.token().await?;
+        let fetch = |url: String| {
+            let client = self.client.clone();
+            let token = token.clone();
+            async move {
+                client
+                    .get(url)
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .context("tvdb episodes request failed")?
+                    .error_for_status()
+                    .context("tvdb episodes returned an error status")?
+                    .json::<EpisodesResponse>()
+                    .await
+                    .context("tvdb episodes response was not valid JSON")
+            }
+        };
+
+        let resp = match fetch(format!(
+            "https://api4.thetvdb.com/v4/series/{series_id}/episodes/default/eng"
+        ))
+        .await
+        {
+            Ok(resp) => resp,
+            Err(_) => {
+                fetch(format!(
+                    "https://api4.thetvdb.com/v4/series/{series_id}/episodes/default"
+                ))
+                .await?
+            }
+        };
 
         Ok(resp
             .data
