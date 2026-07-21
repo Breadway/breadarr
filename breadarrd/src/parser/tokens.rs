@@ -50,8 +50,21 @@ static SXXEXX_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bS(\d{1,2})E(\d{1,3})(?:v\d+)?\b").unwrap());
 static SXX_DASH_EP_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bS(\d{1,2})\s*-\s*(\d{1,3})\b").unwrap());
+// A bare season marker with no episode number attached — "S01", "Season 8",
+// "Season.1", optionally with a trailing "Complete"/spelled-out season word
+// (e.g. "[Season 4 Four Complete]") that's irrelevant to the number itself.
+// Previously required literal parens around an explicit "S?N Complete)"
+// shape, matching only one specific release-group convention; real
+// releases routinely drop the parens, drop "Complete" entirely (e.g.
+// "Game of Thrones - Season 8 S08 - 2019"), or spell "Season" out with a
+// dot instead of a space (verified live: several real review-queue entries
+// failed to resolve at all — season came back `None` — because none of
+// these shapes matched the old pattern). Only reached after
+// `SXXEXX_RE`/`SXX_DASH_EP_RE` have already failed to find an actual
+// episode number, so treating a bare season marker as a pack signal here is
+// safe.
 static SEASON_PACK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\(S?(\d{1,2})\s*Complete\)").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\bS(?:eason)?\.?\s*(\d{1,2})\b").unwrap());
 static DASH_EPISODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-\s*(\d{1,3})\b").unwrap());
 
 // A batch/season-pack release covering many episodes in one torrent.

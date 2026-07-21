@@ -182,6 +182,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_season_pack_shapes_without_literal_parens() {
+        // Real review-queue entries that all failed to resolve at all
+        // before this fix — season came back None, not just unmatched
+        // episode — because SEASON_PACK_RE required a literal
+        // "(S?N Complete)" shape.
+        assert_eq!(
+            parse("Modern.Family.S10.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV").season,
+            Some(10)
+        );
+        assert_eq!(
+            parse("Modern Family 2009 Season 8 Complete 720p AMZN WEBRip x264 [i_c]").season,
+            Some(8)
+        );
+        assert_eq!(
+            parse("Red.Dwarf.S04.1080p.BluRay.x264-LATENCY [Season 4 Four Complete]").season,
+            Some(4)
+        );
+        assert_eq!(
+            parse("Red.Dwarf.S11.1080p.BluRay.x264-SHORTBREHD [Season 11 Eleven]").season,
+            Some(11)
+        );
+        assert_eq!(
+            parse("Game of Thrones - Season 8 S08 - 2019 1080p Bluray AAC5.1 x264-R").season,
+            Some(8)
+        );
+    }
+
+    #[test]
     fn parses_yameii_dash_sxxexx_with_english_dub_tag() {
         let p = parse("[Yameii] Ascendance of a Bookworm - S04E11 [English Dub] [CR WEB-DL 1080p H264 AAC] [8ACE7B72] (Honzuki no Gekokujou)");
         assert_eq!(p.group.as_deref(), Some("Yameii"));
