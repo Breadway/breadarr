@@ -123,6 +123,20 @@ fn looks_like_season_pack(parsed: &ParsedRelease) -> bool {
     parsed.season.is_some() && parsed.episode.is_none() && parsed.absolute_episode.is_none()
 }
 
+/// Sort key for a batch of raw search results: season packs first (a pack
+/// clears every missing episode in one grab instead of one at a time, and
+/// each still goes through the normal seeder/quality gate in `process_item`
+/// — a pack with too few seeders is rejected there and iteration just falls
+/// through to the next candidate, so this never trades a viable single
+/// episode for an unviable pack), highest-seeded first within each group.
+fn release_sort_key(item: &RawReleaseItem) -> (std::cmp::Reverse<bool>, std::cmp::Reverse<u32>) {
+    let is_pack = looks_like_season_pack(&parser::parse(&item.title));
+    (
+        std::cmp::Reverse(is_pack),
+        std::cmp::Reverse(item.seeders.unwrap_or(0)),
+    )
+}
+
 /// True when a release's raw title carries an explicit non-video format
 /// marker — an ebook, audiobook, or comic that happens to share a
 /// monitored show/movie's title text, not an actual episode or film. A
@@ -1638,7 +1652,7 @@ pub async fn execute_search_targets(
             };
 
         let mut sorted = items;
-        sorted.sort_by_key(|i| std::cmp::Reverse(i.seeders.unwrap_or(0)));
+        sorted.sort_by_key(release_sort_key);
         sorted.truncate(MAX_RESULTS_PER_SEARCH);
 
         // Computed once per target, over candidates that at least pass the
@@ -2628,6 +2642,54 @@ mod tests {
         assert!(!looks_like_season_pack(&parser::parse(
             "Some Movie 2016 1080p BluRay"
         )));
+    }
+
+    #[test]
+    fn release_sort_key_prefers_a_season_pack_over_a_higher_seeded_episode() {
+        let pack = RawReleaseItem {
+            title: "Some Show (S02 Complete) 1080p WEB-DL".into(),
+            link: String::new(),
+            guid: "pack".into(),
+            size_bytes: None,
+            seeders: Some(10),
+            leechers: None,
+        };
+        let episode = RawReleaseItem {
+            title: "Some Show S02E05 1080p WEB-DL".into(),
+            link: String::new(),
+            guid: "episode".into(),
+            size_bytes: None,
+            seeders: Some(500),
+            leechers: None,
+        };
+        let mut items = vec![episode.clone(), pack.clone()];
+        items.sort_by_key(release_sort_key);
+        assert_eq!(items[0].guid, "pack");
+        assert_eq!(items[1].guid, "episode");
+    }
+
+    #[test]
+    fn release_sort_key_falls_back_to_seeders_within_the_same_group() {
+        let low = RawReleaseItem {
+            title: "Some Show S02E05 1080p WEB-DL".into(),
+            link: String::new(),
+            guid: "low".into(),
+            size_bytes: None,
+            seeders: Some(5),
+            leechers: None,
+        };
+        let high = RawReleaseItem {
+            title: "Some Show S02E05 720p WEB-DL".into(),
+            link: String::new(),
+            guid: "high".into(),
+            size_bytes: None,
+            seeders: Some(50),
+            leechers: None,
+        };
+        let mut items = vec![low.clone(), high.clone()];
+        items.sort_by_key(release_sort_key);
+        assert_eq!(items[0].guid, "high");
+        assert_eq!(items[1].guid, "low");
     }
 
     #[test]
