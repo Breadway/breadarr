@@ -474,12 +474,9 @@ async fn process_item(
 
     let parsed = parser::parse(&item.title);
 
-    let candidate = match matcher.match_title(conn, &parsed.title_normalized)? {
-        MatchOutcome::Auto(c) => c,
-        MatchOutcome::NeedsReview(c) => {
-            matcher::queue_for_review(conn, &item.title, &c, Some(&item.link), Some(source_id))?;
-            return Ok(ProcessOutcome::QueuedForReview);
-        }
+    let (candidate, needs_review) = match matcher.match_title(conn, &parsed.title_normalized)? {
+        MatchOutcome::Auto(c) => (c, false),
+        MatchOutcome::NeedsReview(c) => (c, true),
         MatchOutcome::NoMatch => return Ok(ProcessOutcome::NoMatch),
     };
 
@@ -488,6 +485,16 @@ async fn process_item(
     let mut episode_id: Option<i64> = None;
     let mut season_pack_number: Option<u32> = None;
 
+    // Whether this match needs a human's confirmation (queued for review)
+    // or was confident enough to act on automatically, the show/season/
+    // episode/movie still has to actually need *something* first — a
+    // low-confidence title match against an already-complete show gains
+    // nothing from a human's yes/no, it's just noise that reappears every
+    // cycle the source keeps re-listing the same old release (verified
+    // live: fully-complete shows' season-pack re-releases piling up in the
+    // review queue indefinitely because this check only ever ran on the
+    // auto-match path). So this eligibility check runs before the
+    // queue-for-review decision below, not only on the auto-grab path.
     if media_item.kind == "movie" {
         // A release carrying a season/episode/absolute-episode marker
         // title-matched a movie by name alone — it's actually an episode
@@ -525,6 +532,17 @@ async fn process_item(
             return Ok(ProcessOutcome::NotMonitoredOrAlreadyHave);
         };
         episode_id = Some(eid);
+    }
+
+    if needs_review {
+        matcher::queue_for_review(
+            conn,
+            &item.title,
+            &candidate,
+            Some(&item.link),
+            Some(source_id),
+        )?;
+        return Ok(ProcessOutcome::QueuedForReview);
     }
 
     let anime = match media_item.tvdb_id {
