@@ -97,23 +97,34 @@ pub fn insert_series(
 
     let mut seasons_seen = HashSet::new();
     for ep in episodes {
+        // TVDB's "season 0" is a catch-all for specials — recaps, shorts,
+        // and often a tie-in movie that's frequently already tracked as
+        // its own separate `media_item` (verified live: Chainsaw Man's
+        // season 0 included "Chainsaw Man – The Movie: Reze Arc", which
+        // already exists as its own movie entry). Monitoring these by
+        // default means the library never actually "completes" and the
+        // missing-episode count is inflated with content the user was
+        // never trying to acquire as episodes in the first place. Regular
+        // seasons keep the previous default of monitored.
+        let monitored = i64::from(ep.season_number != 0);
         if seasons_seen.insert(ep.season_number) {
             conn.execute(
-                "INSERT OR IGNORE INTO season (media_item_id, season_number, monitored) VALUES (?1, ?2, 1)",
-                params![media_item_id, ep.season_number],
+                "INSERT OR IGNORE INTO season (media_item_id, season_number, monitored) VALUES (?1, ?2, ?3)",
+                params![media_item_id, ep.season_number, monitored],
             )?;
         }
         conn.execute(
             "INSERT OR IGNORE INTO episode
                 (media_item_id, season_number, episode_number, absolute_number, title, air_date, monitored, has_file)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 0)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
             params![
                 media_item_id,
                 ep.season_number,
                 ep.episode_number,
                 ep.absolute_number,
                 ep.title,
-                ep.air_date
+                ep.air_date,
+                monitored,
             ],
         )?;
     }
