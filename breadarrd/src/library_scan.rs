@@ -18,6 +18,7 @@ pub struct ScanReport {
     pub unmatched: Vec<String>,
     pub files_linked: usize,
     pub files_renamed: usize,
+    pub files_reorganized: usize,
 }
 
 fn get_episode_title(conn: &Connection, episode_id: i64) -> Result<Option<String>> {
@@ -523,6 +524,30 @@ pub async fn scan_tv_root(
                     tracing::warn!(file = %file.display(), error = %e, "rename failed, keeping original name");
                     file.clone()
                 }
+            };
+
+            // Files imported before the season-folder convention existed
+            // (or moved around by hand) can still be sitting flat in the
+            // show root — move them under `Season NN` now rather than just
+            // recording wherever they happen to already be. Same
+            // filesystem as `series_dir`, so this is a plain rename.
+            let season_folder = importer::season_dir(&series_dir.to_string_lossy(), season);
+            let final_path = if final_path.parent() != Some(season_folder.as_path()) {
+                match std::fs::create_dir_all(&season_folder).and_then(|_| {
+                    let dest = season_folder.join(final_path.file_name().unwrap());
+                    std::fs::rename(&final_path, &dest).map(|_| dest)
+                }) {
+                    Ok(dest) => {
+                        report.files_reorganized += 1;
+                        dest
+                    }
+                    Err(e) => {
+                        tracing::warn!(file = %final_path.display(), error = %e, "season-folder move failed, keeping in place");
+                        final_path
+                    }
+                }
+            } else {
+                final_path
             };
 
             let size = std::fs::metadata(&final_path)?.len();

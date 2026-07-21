@@ -927,11 +927,12 @@ async fn debug_scan_tv(config: &Config, path: &str) -> Result<()> {
     .await?;
 
     println!(
-        "matched={} unmatched={} files_linked={} files_renamed={}",
+        "matched={} unmatched={} files_linked={} files_renamed={} files_reorganized={}",
         report.matched.len(),
         report.unmatched.len(),
         report.files_linked,
-        report.files_renamed
+        report.files_renamed,
+        report.files_reorganized
     );
     if !report.unmatched.is_empty() {
         println!("unmatched:");
@@ -974,11 +975,12 @@ async fn debug_scan_movies(config: &Config, path: &str) -> Result<()> {
     .await?;
 
     println!(
-        "matched={} unmatched={} files_linked={} files_renamed={}",
+        "matched={} unmatched={} files_linked={} files_renamed={} files_reorganized={}",
         report.matched.len(),
         report.unmatched.len(),
         report.files_linked,
-        report.files_renamed
+        report.files_renamed,
+        report.files_reorganized
     );
     if !report.unmatched.is_empty() {
         println!("unmatched:");

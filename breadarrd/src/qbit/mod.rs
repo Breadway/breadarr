@@ -33,6 +33,15 @@ impl std::fmt::Display for MagnetRejected {
 
 impl std::error::Error for MagnetRejected {}
 
+/// Newer qBittorrent WebUI API versions' `torrents/add` JSON response shape.
+#[derive(Debug, Deserialize, Default)]
+struct AddTorrentResponse {
+    #[serde(default)]
+    success_count: u32,
+    #[serde(default)]
+    failure_count: u32,
+}
+
 pub struct QbitClient {
     base_url: String,
     client: reqwest::Client,
@@ -101,7 +110,12 @@ impl QbitClient {
 
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() || body.trim() != "Ok." {
+        // Older qBittorrent WebUI API versions return 200 with body "Ok.";
+        // newer ones return 204 No Content with an empty body instead. Bad
+        // credentials return a real error status (401), which `is_success`
+        // already catches — the response body's exact text isn't part of
+        // the actual success contract, just an artifact of the old version.
+        if !status.is_success() {
             bail!("qbit login failed: status={status} body={body:?}");
         }
         Ok(())
@@ -142,13 +156,21 @@ impl QbitClient {
             }
             // qBittorrent's add-torrent endpoint returns HTTP 200 even when
             // it rejects the magnet outright (a dead/malformed hash, one it
-            // already knows is unreachable) — the *only* signal is the
-            // response body text ("Ok." vs "Fails."). Without this check a
-            // rejected magnet looks identical to a real success: the caller
-            // records a `release` row as grabbed and nothing ever
-            // downloads, silently and permanently (verified live — this
-            // happened for a real release).
-            if body.trim() != "Ok." {
+            // already knows is unreachable) — the response body is the only
+            // signal. Older qBittorrent versions returned plain text ("Ok."
+            // vs "Fails."); newer ones return a JSON summary with
+            // success_count/failure_count instead (verified live against
+            // the currently deployed version). Without checking whichever
+            // shape is actually in play, a rejected magnet looks identical
+            // to a real success: the caller records a `release` row as
+            // grabbed and nothing ever downloads, silently and permanently
+            // (verified live — this happened for a real release under the
+            // old text-only check).
+            let rejected = match serde_json::from_str::<AddTorrentResponse>(&body) {
+                Ok(r) => r.failure_count > 0 || r.success_count == 0,
+                Err(_) => body.trim() != "Ok.",
+            };
+            if rejected {
                 return Err(anyhow::Error::new(MagnetRejected { body }));
             }
             return Ok(());
