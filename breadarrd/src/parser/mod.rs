@@ -132,6 +132,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_sxxexx_with_a_trailing_fansub_revision_tag() {
+        // "v2" glued directly onto the episode number ("a fixed re-release
+        // of this episode") previously broke the word-boundary check
+        // entirely, leaving season/episode both None.
+        let p = parse("[Judas] Chainsaw Man - S01E01v2 1080p WEB-DL");
+        assert_eq!(p.season, Some(1));
+        assert_eq!(p.episode, Some(1));
+    }
+
+    #[test]
     fn parses_subsplease_dash_episode_with_group_and_hash() {
         let p = parse("[SubsPlease] Honzuki no Gekokujou S4 - 13 (1080p) [A4FE0990].mkv");
         assert_eq!(p.group.as_deref(), Some("SubsPlease"));

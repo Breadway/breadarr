@@ -38,8 +38,16 @@ static YEAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[(\[](19|20)\d{2
 static BARE_YEAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b((?:19|20)\d{2})\b").unwrap());
 
+// The trailing `v\d+` is a fansub revision tag ("v2" = "second release of
+// this episode, fixed encode/subs") stuck directly onto the episode number
+// with no separator — "S01E01v2". Without consuming it before the `\b`,
+// the boundary check fails outright (digit→letter isn't a word boundary),
+// so the whole pattern silently doesn't match and the file falls through
+// to unparsed (verified live: every v2 release of several shows, e.g. an
+// entire show that only had v2 releases, ended up with zero linked
+// episode files during a library scan).
 static SXXEXX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bS(\d{1,2})E(\d{1,3})\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\bS(\d{1,2})E(\d{1,3})(?:v\d+)?\b").unwrap());
 static SXX_DASH_EP_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bS(\d{1,2})\s*-\s*(\d{1,3})\b").unwrap());
 static SEASON_PACK_RE: LazyLock<Regex> =
