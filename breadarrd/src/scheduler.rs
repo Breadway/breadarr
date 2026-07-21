@@ -534,17 +534,6 @@ async fn process_item(
         episode_id = Some(eid);
     }
 
-    if needs_review {
-        matcher::queue_for_review(
-            conn,
-            &item.title,
-            &candidate,
-            Some(&item.link),
-            Some(source_id),
-        )?;
-        return Ok(ProcessOutcome::QueuedForReview);
-    }
-
     let anime = match media_item.tvdb_id {
         Some(id) => is_anime(conn, id)?,
         None => false,
@@ -566,8 +555,28 @@ async fn process_item(
         is_season_pack: season_pack_number.is_some(),
     };
 
+    // Quality gates — including "reject sub-1080p when a 1080p+ alternative
+    // exists in this same batch" — apply before a candidate ever reaches a
+    // human, not just on the confident auto-grab path. A human's review
+    // decision is about whether this is genuinely the right show/season;
+    // it was never meant to also be the place quality standards get
+    // relaxed just because the title match happened to be ambiguous
+    // (verified live: several 720p season-pack releases sat in the review
+    // queue for shows that also had 1080p+ releases available in the same
+    // search, when they should have been silently gate-rejected instead).
     if let GateResult::Reject(reason) = scoring::evaluate_gates(&parsed, &gate_ctx, &profile) {
         return Ok(ProcessOutcome::GateRejected(reason));
+    }
+
+    if needs_review {
+        matcher::queue_for_review(
+            conn,
+            &item.title,
+            &candidate,
+            Some(&item.link),
+            Some(source_id),
+        )?;
+        return Ok(ProcessOutcome::QueuedForReview);
     }
 
     let release_score = scoring::score(&parsed, item.seeders.unwrap_or(0), false, &profile);
