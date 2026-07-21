@@ -227,6 +227,24 @@ pub(crate) fn season_dir(root_folder: &str, season_number: u32) -> PathBuf {
     Path::new(root_folder).join(format!("Season {season_number:02}"))
 }
 
+/// TVDB stores some shows' episode titles only in their original-airing
+/// language (verified live: entire seasons of otherwise-English-titled
+/// shows came back with Japanese-only episode titles, no English fallback
+/// available from the API at all) — using that title verbatim in a
+/// generated filename buries a CJK title inside an otherwise-Latin-script
+/// library, which nothing downstream (search, external tools, a user
+/// scanning a directory listing) can actually read. Better to just omit the
+/// episode title than emit a filename with random plaintext.
+fn has_cjk(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(c,
+            '\u{3040}'..='\u{30FF}'   // hiragana + katakana
+            | '\u{4E00}'..='\u{9FFF}' // CJK unified ideographs
+            | '\u{FF00}'..='\u{FFEF}' // fullwidth forms
+        )
+    })
+}
+
 pub(crate) fn deterministic_filename(
     series_title: &str,
     season: u32,
@@ -235,7 +253,7 @@ pub(crate) fn deterministic_filename(
     ext: &str,
 ) -> String {
     let series = sanitize(series_title);
-    match episode_title.filter(|t| !t.is_empty()) {
+    match episode_title.filter(|t| !t.is_empty() && !has_cjk(t)) {
         Some(t) => format!(
             "{series} - S{season:02}E{episode:02} - {}.{ext}",
             sanitize(t)
@@ -2712,6 +2730,17 @@ mod tests {
     #[test]
     fn sanitizes_path_hostile_characters() {
         assert_eq!(sanitize("Kill: Ao / Blue?"), "Kill_ Ao _ Blue_");
+    }
+
+    #[test]
+    fn omits_a_cjk_only_episode_title_instead_of_embedding_it() {
+        // TVDB sometimes has no English episode title at all for a given
+        // show, only the original Japanese one — verified live across
+        // several real shows' entire seasons.
+        assert_eq!(
+            deterministic_filename("Helck", 1, 3, Some("未知の敵"), "mkv"),
+            "Helck - S01E03.mkv"
+        );
     }
 
     #[test]
