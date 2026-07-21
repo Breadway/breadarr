@@ -23,7 +23,7 @@ pub async fn stuck(
 
     let mut stmt = conn
         .prepare(
-            "SELECT r.id, m.title, r.raw_title, r.grabbed_at
+            "SELECT r.id, r.media_item_id, m.title, r.raw_title, r.grabbed_at
              FROM release r JOIN media_item m ON m.id = r.media_item_id
              WHERE r.status = 'grabbed'
                AND (julianday('now') - julianday(r.grabbed_at)) * 24.0 > ?1
@@ -34,9 +34,10 @@ pub async fn stuck(
         .query_map([STALLED_GRAB_HOURS], |row| {
             Ok(StalledGrab {
                 release_id: row.get(0)?,
-                media_title: row.get(1)?,
-                raw_title: row.get(2)?,
-                grabbed_at: row.get(3)?,
+                media_item_id: row.get(1)?,
+                media_title: row.get(2)?,
+                raw_title: row.get(3)?,
+                grabbed_at: row.get(4)?,
             })
         })
         .map_err(internal)?

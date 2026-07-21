@@ -14,7 +14,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{App, Focus, Tab};
+use app::{App, Focus, StuckSection, Tab};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,8 +47,9 @@ async fn run(
     let mut last_refresh = tokio::time::Instant::now() - Duration::from_secs(10);
 
     loop {
-        if last_refresh.elapsed() >= Duration::from_secs(3) {
+        if last_refresh.elapsed() >= Duration::from_secs(3) || app.force_refresh {
             app.refresh_active_tab().await;
+            app.force_refresh = false;
             last_refresh = tokio::time::Instant::now();
         }
 
@@ -101,6 +102,16 @@ async fn handle_key(app: &mut App, code: KeyCode, root_folder: &str) {
         return;
     }
 
+    // Help overlay intercepts everything while open, same
+    // priority-over-global-keys idiom as the two input modes above.
+    if app.help_visible {
+        match code {
+            KeyCode::Char('?') | KeyCode::Esc => app.help_visible = false,
+            _ => {}
+        }
+        return;
+    }
+
     // Any key other than a second `x`/`d` clears a pending delete
     // confirmation — the confirmation must be the very next keypress, not
     // just "any keypress before the user gets distracted."
@@ -136,8 +147,28 @@ async fn handle_key(app: &mut App, code: KeyCode, root_folder: &str) {
                 app.start_editing_selected_weight();
             }
             Tab::Profiles => app.open_profile_detail(),
+            Tab::Stuck => app.jump_to_stuck_target().await,
             _ => {}
         },
+        KeyCode::Left | KeyCode::Right if matches!(app.tab, Tab::Stuck) => {
+            app.stuck_focus = match app.stuck_focus {
+                StuckSection::Stalled => StuckSection::Maxed,
+                StuckSection::Maxed => StuckSection::Stalled,
+            };
+        }
+        KeyCode::Char('?') => app.help_visible = true,
+        KeyCode::Char('R') => app.force_refresh = true,
+        KeyCode::Char('f') if matches!(app.tab, Tab::Library) && app.detail.is_none() => {
+            app.library_filter = app.library_filter.next();
+            app.recompute_library_view();
+        }
+        KeyCode::Char('o') if matches!(app.tab, Tab::Library) && app.detail.is_none() => {
+            app.library_sort = app.library_sort.next();
+            app.recompute_library_view();
+        }
+        KeyCode::Char('m') if matches!(app.tab, Tab::Library) && app.detail.is_none() => {
+            app.toggle_monitor_list_selected().await;
+        }
         KeyCode::Char('a') if matches!(app.tab, Tab::Review) => {
             app.approve_selected_review().await;
         }

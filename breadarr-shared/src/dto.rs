@@ -56,6 +56,7 @@ pub struct ReviewQueueEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StalledGrab {
     pub release_id: i64,
+    pub media_item_id: i64,
     pub media_title: String,
     pub raw_title: String,
     pub grabbed_at: String,

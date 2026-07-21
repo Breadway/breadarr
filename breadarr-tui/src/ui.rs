@@ -1,10 +1,20 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs};
 use ratatui::Frame;
 
-use crate::app::{App, Focus, Tab};
+use crate::app::{App, Focus, StuckSection, Tab};
+
+// Shared color palette — kept to these meanings so a color never has to be
+// second-guessed at a glance:
+//   Green      healthy / 0 missing / high confidence / not stuck
+//   Yellow     warning / low missing / mid confidence / at backoff ceiling
+//   Red        critical / high missing / low confidence / past ceiling
+//   DarkGray   unmonitored / muted / not currently relevant
+//   Blue       TV kind tag (categorical, not severity)
+//   Magenta    Movie kind tag (categorical, not severity)
+//   Cyan       focus/interactive accent (tab highlight, active input, focused section) — never severity
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -30,6 +40,102 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     draw_status(frame, chunks[2], app);
+
+    if app.help_visible {
+        draw_help_overlay(frame, frame.area(), app);
+    }
+}
+
+/// Keybindings relevant to the current tab/focus/detail state, in the order
+/// they should be shown — the single source of truth shared by the status
+/// bar (which shows a short prefix) and the help overlay (which shows all of
+/// it plus `GLOBAL_KEYS`), so the two can't drift apart.
+fn context_keybindings(app: &App) -> Vec<(&'static str, &'static str)> {
+    match app.tab {
+        Tab::Library if matches!(app.focus, Focus::Candidates) => {
+            vec![("Enter", "grab"), ("Esc", "cancel")]
+        }
+        Tab::Library if app.detail.is_some() => vec![
+            ("Esc", "back"),
+            ("s", "search now"),
+            ("m", "monitor show"),
+            ("e", "monitor episode"),
+            ("S", "monitor season"),
+            ("x", "delete show"),
+            ("d", "delete file"),
+            ("c", "pick release"),
+        ],
+        Tab::Library => vec![
+            ("Enter", "open detail"),
+            ("f", "cycle filter"),
+            ("o", "cycle sort"),
+            ("m", "monitor toggle"),
+        ],
+        Tab::Review => vec![("a", "approve"), ("r", "reject")],
+        Tab::Add => match app.focus {
+            Focus::AddSearchInput => vec![("Enter", "search")],
+            _ => vec![("Enter", "add"), ("Esc", "back to search")],
+        },
+        Tab::Profiles if app.profile_detail.is_some() => {
+            vec![("Enter", "edit weight"), ("Esc", "back")]
+        }
+        Tab::Profiles => vec![("Enter", "open profile")],
+        Tab::Stuck => vec![("Left/Right", "switch section"), ("Enter", "jump to show")],
+        _ => vec![],
+    }
+}
+
+const GLOBAL_KEYS: &[(&str, &str)] = &[
+    ("Tab", "switch tab"),
+    ("j/k", "move"),
+    ("?", "help"),
+    ("R", "refresh now"),
+    ("q", "quit"),
+];
+
+/// Centers a `width` x `height` rect inside `area` — standard ratatui idiom
+/// for a popup/overlay.
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+fn draw_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines: Vec<Line> = context_keybindings(app)
+        .into_iter()
+        .map(|(key, desc)| {
+            Line::from(vec![
+                Span::styled(format!("{key:12}"), Style::default().fg(Color::Cyan)),
+                Span::raw(desc),
+            ])
+        })
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Global",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(GLOBAL_KEYS.iter().map(|(key, desc)| {
+        Line::from(vec![
+            Span::styled(format!("{key:12}"), Style::default().fg(Color::Cyan)),
+            Span::raw(*desc),
+        ])
+    }));
+
+    let popup = centered_rect(50, lines.len() as u16 + 2, area);
+    frame.render_widget(Clear, popup);
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Help — ? or Esc to close"),
+    );
+    frame.render_widget(paragraph, popup);
 }
 
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
@@ -88,18 +194,21 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
             .episodes
             .iter()
             .map(|e| {
-                let status = if e.has_file {
-                    "✓"
+                let (status, color) = if e.has_file {
+                    ("✓", Color::Green)
                 } else if e.monitored {
-                    "…"
+                    ("…", Color::Yellow)
                 } else {
-                    "-"
+                    ("-", Color::DarkGray)
                 };
                 let title = e.title.as_deref().unwrap_or("");
-                ListItem::new(format!(
-                    "{status} S{:02}E{:02}  {title}",
-                    e.season_number, e.episode_number
-                ))
+                ListItem::new(Line::from(vec![
+                    Span::styled(status, Style::default().fg(color)),
+                    Span::raw(format!(
+                        " S{:02}E{:02}  {title}",
+                        e.season_number, e.episode_number
+                    )),
+                ]))
             })
             .collect();
         let monitor_label = if detail.monitored {
@@ -116,9 +225,7 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
         };
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(format!(
-                "{} ({}) [{monitor_label}] — Esc: back  s: search now  m: monitor show  \
-                 e: monitor episode  S: monitor season  x: delete show  d: delete file  \
-                 c: pick release{confirm}",
+                "{} ({}) [{monitor_label}]{confirm}",
                 detail.title,
                 detail.year.map(|y| y.to_string()).unwrap_or_default()
             )))
@@ -129,28 +236,64 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let items: Vec<ListItem> = app
-        .media_items
+        .library_view
         .iter()
-        .map(|m| {
-            let missing = if m.missing_count > 0 {
+        .map(|&i| {
+            let m = &app.media_items[i];
+            let kind_tag = if m.kind == "movie" { "[Movie]" } else { "[TV]" };
+            let kind_color = if m.kind == "movie" {
+                Color::Magenta
+            } else {
+                Color::Blue
+            };
+            let ratio = if m.episode_count > 0 {
+                m.missing_count as f64 / m.episode_count as f64
+            } else if m.missing_count > 0 {
+                1.0
+            } else {
+                0.0
+            };
+            // Mute severity color for unmonitored items — a missing count
+            // on something deliberately unmonitored isn't actionable.
+            let missing_color = if !m.monitored || m.missing_count == 0 {
+                Color::DarkGray
+            } else if ratio <= 0.25 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            let missing_text = if m.missing_count > 0 {
                 format!(" — {} missing", m.missing_count)
             } else {
                 String::new()
             };
-            ListItem::new(format!(
-                "{} ({}){}",
-                m.title,
-                m.year.map(|y| y.to_string()).unwrap_or_default(),
-                missing
-            ))
+            let title_style = if m.monitored {
+                Style::default()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{kind_tag} "), Style::default().fg(kind_color)),
+                Span::styled(
+                    format!(
+                        "{} ({})",
+                        m.title,
+                        m.year.map(|y| y.to_string()).unwrap_or_default()
+                    ),
+                    title_style,
+                ),
+                Span::styled(missing_text, Style::default().fg(missing_color)),
+            ]))
         })
         .collect();
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Monitored Shows — Enter for detail"),
-        )
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "Monitored Shows ({}/{}) — filter: {}  sort: {}",
+            app.library_view.len(),
+            app.media_items.len(),
+            app.library_filter.label(),
+            app.library_sort.label()
+        )))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = app.media_state.clone();
     frame.render_stateful_widget(list, area, &mut state);
@@ -233,12 +376,21 @@ fn draw_review(frame: &mut Frame, area: Rect, app: &App) {
         .review_items
         .iter()
         .map(|r| {
-            ListItem::new(format!(
-                "({:.0}%) {} -> {}",
-                r.confidence * 100.0,
-                r.raw_release_title,
-                r.candidate_media_title.as_deref().unwrap_or("?")
-            ))
+            let color = if r.confidence < 0.70 {
+                Color::Red
+            } else if r.confidence < 0.85 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("({:.0}%)", r.confidence * 100.0), Style::default().fg(color)),
+                Span::raw(format!(
+                    " {} -> {}",
+                    r.raw_release_title,
+                    r.candidate_media_title.as_deref().unwrap_or("?")
+                )),
+            ]))
         })
         .collect();
     let list = List::new(items)
@@ -256,6 +408,11 @@ fn draw_review(frame: &mut Frame, area: Rect, app: &App) {
 /// than expected, how deep the review queue has backed up, and search
 /// targets that have been failing every attempt long enough for their
 /// backoff to hit its ceiling. Read-only report, no selection/navigation.
+// Mirrors breadarrd/src/api/routes/stuck.rs::MAXED_SEARCH_COUNT. Duplicated
+// because the daemon doesn't expose it via the API; if it drifts this is
+// cosmetic only (wrong shade), not a behavior bug.
+const MAXED_SEARCH_COUNT: i64 = 6;
+
 fn draw_stuck(frame: &mut Frame, area: Rect, app: &App) {
     let Some(report) = &app.stuck else {
         let placeholder = Paragraph::new("loading...").block(
@@ -272,42 +429,71 @@ fn draw_stuck(frame: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Min(3), Constraint::Min(3)])
         .split(area);
 
+    let stalled_border = if matches!(app.stuck_focus, StuckSection::Stalled) {
+        Color::Cyan
+    } else {
+        Color::Reset
+    };
     let stalled_items: Vec<ListItem> = report
         .stalled_grabs
         .iter()
         .map(|g| {
-            ListItem::new(format!(
-                "{} — {} (grabbed {})",
-                g.media_title, g.raw_title, g.grabbed_at
-            ))
+            ListItem::new(Line::from(Span::styled(
+                format!("{} — {} (grabbed {})", g.media_title, g.raw_title, g.grabbed_at),
+                Style::default().fg(Color::Yellow),
+            )))
         })
         .collect();
-    let stalled_list =
-        List::new(stalled_items).block(Block::default().borders(Borders::ALL).title(format!(
-            "Stalled grabs ({}) — review queue: {} pending",
-            report.stalled_grabs.len(),
-            report.review_queue_depth
-        )));
-    frame.render_widget(stalled_list, chunks[0]);
+    let stalled_list = List::new(stalled_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(stalled_border))
+                .title(format!(
+                    "Stalled grabs ({}) — review queue: {} pending",
+                    report.stalled_grabs.len(),
+                    report.review_queue_depth
+                )),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut stalled_state = app.stalled_state.clone();
+    frame.render_stateful_widget(stalled_list, chunks[0], &mut stalled_state);
 
+    let maxed_border = if matches!(app.stuck_focus, StuckSection::Maxed) {
+        Color::Cyan
+    } else {
+        Color::Reset
+    };
     let maxed_items: Vec<ListItem> = report
         .maxed_out_search_targets
         .iter()
         .map(|t| {
-            ListItem::new(format!(
-                "{} — {} attempts, last searched {}",
-                t.media_title,
-                t.search_count,
-                t.last_searched_at.as_deref().unwrap_or("never")
-            ))
+            let color = if t.search_count > MAXED_SEARCH_COUNT {
+                Color::Red
+            } else {
+                Color::Yellow
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!(
+                    "{} — {} attempts, last searched {}",
+                    t.media_title,
+                    t.search_count,
+                    t.last_searched_at.as_deref().unwrap_or("never")
+                ),
+                Style::default().fg(color),
+            )))
         })
         .collect();
-    let maxed_list = List::new(maxed_items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Search targets at max backoff"),
-    );
-    frame.render_widget(maxed_list, chunks[1]);
+    let maxed_list = List::new(maxed_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(maxed_border))
+                .title("Search targets at max backoff — Enter: jump to show"),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut maxed_state = app.maxed_state.clone();
+    frame.render_stateful_widget(maxed_list, chunks[1], &mut maxed_state);
 }
 
 fn draw_add(frame: &mut Frame, area: Rect, app: &App) {
@@ -549,10 +735,15 @@ fn draw_profiles(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
-    let text = if app.status.is_empty() {
-        "Tab: switch view  |  j/k: move  |  q: quit".to_string()
-    } else {
+    let text = if !app.status.is_empty() {
         app.status.clone()
+    } else {
+        let hints: Vec<String> = context_keybindings(app)
+            .into_iter()
+            .take(4)
+            .map(|(key, desc)| format!("{key}: {desc}"))
+            .collect();
+        format!("{}  |  ?: help", hints.join("  |  "))
     };
     let status = Paragraph::new(text).block(Block::default().borders(Borders::ALL));
     frame.render_widget(status, area);

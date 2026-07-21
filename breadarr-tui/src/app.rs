@@ -74,6 +74,88 @@ impl AddKind {
     }
 }
 
+/// Client-side filter over the already-fetched `media_items` — the server
+/// has no filter/sort query params, and the library is small enough that
+/// refiltering the in-memory `Vec` on every keypress is free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryFilter {
+    All,
+    Series,
+    Movies,
+    Missing,
+    Unmonitored,
+}
+
+impl LibraryFilter {
+    pub const ALL: [LibraryFilter; 5] = [
+        LibraryFilter::All,
+        LibraryFilter::Series,
+        LibraryFilter::Movies,
+        LibraryFilter::Missing,
+        LibraryFilter::Unmonitored,
+    ];
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            LibraryFilter::All => "all",
+            LibraryFilter::Series => "series",
+            LibraryFilter::Movies => "movies",
+            LibraryFilter::Missing => "missing",
+            LibraryFilter::Unmonitored => "unmonitored",
+        }
+    }
+
+    fn matches(&self, m: &MediaItemSummary) -> bool {
+        match self {
+            LibraryFilter::All => true,
+            LibraryFilter::Series => m.kind == "series",
+            LibraryFilter::Movies => m.kind == "movie",
+            LibraryFilter::Missing => m.missing_count > 0,
+            LibraryFilter::Unmonitored => !m.monitored,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibrarySort {
+    TitleAsc,
+    MissingDesc,
+    Kind,
+}
+
+impl LibrarySort {
+    pub const ALL: [LibrarySort; 3] = [
+        LibrarySort::TitleAsc,
+        LibrarySort::MissingDesc,
+        LibrarySort::Kind,
+    ];
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            LibrarySort::TitleAsc => "title",
+            LibrarySort::MissingDesc => "missing",
+            LibrarySort::Kind => "kind",
+        }
+    }
+}
+
+/// Which half of the Stuck tab has selection/arrow-key focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StuckSection {
+    Stalled,
+    Maxed,
+}
+
 /// A weight axis's display name plus a getter/setter pair, so
 /// `WEIGHT_FIELDS` can enumerate `WeightsDto`'s fields by position instead
 /// of every caller matching on an index.
@@ -123,9 +205,24 @@ pub struct App {
     pub focus: Focus,
     pub status: String,
     pub should_quit: bool,
+    /// Toggled by `?`; intercepted at the top of `main.rs`'s key handler
+    /// like `Focus::AddSearchInput`/`Focus::WeightInput`, but kept as its
+    /// own bool (not folded into `Focus`) since it needs to open from any
+    /// tab rather than being scoped to one.
+    pub help_visible: bool,
+    /// Set by the `R` key; consumed by `main.rs`'s refresh loop to bypass
+    /// the normal 3s throttle for one immediate refresh.
+    pub force_refresh: bool,
 
     pub media_items: Vec<MediaItemSummary>,
     pub media_state: ListState,
+    /// Filtered+sorted indices into `media_items`, recomputed by
+    /// `recompute_library_view` — the top-level Library list and
+    /// `media_state` always operate over this, never over `media_items`
+    /// directly, so filter/sort never has to touch the raw fetched data.
+    pub library_view: Vec<usize>,
+    pub library_filter: LibraryFilter,
+    pub library_sort: LibrarySort,
     pub detail: Option<MediaItemDetail>,
     /// Selection within `detail.episodes` — separate from `media_state`
     /// since they're two different lists sharing the same tab.
@@ -142,6 +239,9 @@ pub struct App {
     pub add_results_state: ListState,
 
     pub stuck: Option<StuckReport>,
+    pub stuck_focus: StuckSection,
+    pub stalled_state: ListState,
+    pub maxed_state: ListState,
     pub calendar: Vec<CalendarEntry>,
     pub library_health: Option<LibraryHealthReport>,
 
@@ -185,8 +285,13 @@ impl App {
             focus: Focus::List,
             status: String::new(),
             should_quit: false,
+            help_visible: false,
+            force_refresh: false,
             media_items: Vec::new(),
             media_state: ListState::default(),
+            library_view: Vec::new(),
+            library_filter: LibraryFilter::All,
+            library_sort: LibrarySort::TitleAsc,
             detail: None,
             episode_state: ListState::default(),
             releases: Vec::new(),
@@ -197,6 +302,9 @@ impl App {
             add_results: Vec::new(),
             add_results_state: ListState::default(),
             stuck: None,
+            stuck_focus: StuckSection::Stalled,
+            stalled_state: ListState::default(),
+            maxed_state: ListState::default(),
             calendar: Vec::new(),
             library_health: None,
             candidates: Vec::new(),
@@ -236,9 +344,7 @@ impl App {
                         }
                     } else {
                         self.media_items = self.client.list_media().await?;
-                        if self.media_state.selected().is_none() && !self.media_items.is_empty() {
-                            self.media_state.select(Some(0));
-                        }
+                        self.recompute_library_view();
                     }
                 }
                 Tab::History => {
@@ -255,7 +361,17 @@ impl App {
                 }
                 Tab::Add => {}
                 Tab::Stuck => {
-                    self.stuck = Some(self.client.stuck().await?);
+                    let report = self.client.stuck().await?;
+                    if self.stalled_state.selected().is_none() && !report.stalled_grabs.is_empty()
+                    {
+                        self.stalled_state.select(Some(0));
+                    }
+                    if self.maxed_state.selected().is_none()
+                        && !report.maxed_out_search_targets.is_empty()
+                    {
+                        self.maxed_state.select(Some(0));
+                    }
+                    self.stuck = Some(report);
                 }
                 Tab::Calendar => {
                     self.calendar = self.client.calendar().await?;
@@ -287,13 +403,68 @@ impl App {
         self.detail.as_ref().map(|d| d.id)
     }
 
+    /// Rebuilds `library_view` from `media_items` under the current
+    /// filter/sort, then re-selects whichever item was selected before (by
+    /// id, not raw index) if it's still in view — falls back to the first
+    /// item, or no selection if the view is now empty. Called after
+    /// `media_items` changes, and after `library_filter`/`library_sort`
+    /// change.
+    pub fn recompute_library_view(&mut self) {
+        let previously_selected_id = self.selected_media_item().map(|m| m.id);
+
+        let mut indices: Vec<usize> = self
+            .media_items
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| self.library_filter.matches(m))
+            .map(|(i, _)| i)
+            .collect();
+
+        match self.library_sort {
+            LibrarySort::TitleAsc => indices.sort_by(|&a, &b| {
+                self.media_items[a]
+                    .title
+                    .to_lowercase()
+                    .cmp(&self.media_items[b].title.to_lowercase())
+            }),
+            LibrarySort::MissingDesc => indices.sort_by(|&a, &b| {
+                self.media_items[b]
+                    .missing_count
+                    .cmp(&self.media_items[a].missing_count)
+            }),
+            LibrarySort::Kind => indices.sort_by(|&a, &b| {
+                self.media_items[a].kind.cmp(&self.media_items[b].kind).then_with(|| {
+                    self.media_items[a]
+                        .title
+                        .to_lowercase()
+                        .cmp(&self.media_items[b].title.to_lowercase())
+                })
+            }),
+        }
+        self.library_view = indices;
+
+        match previously_selected_id
+            .and_then(|id| self.library_view.iter().position(|&i| self.media_items[i].id == id))
+        {
+            Some(pos) => self.media_state.select(Some(pos)),
+            None if !self.library_view.is_empty() => self.media_state.select(Some(0)),
+            None => self.media_state.select(None),
+        }
+    }
+
+    pub fn selected_media_item(&self) -> Option<&MediaItemSummary> {
+        let idx = self.media_state.selected()?;
+        let real_idx = *self.library_view.get(idx)?;
+        self.media_items.get(real_idx)
+    }
+
     pub fn move_selection(&mut self, delta: i32) {
         let (state, len) = match self.tab {
             Tab::Library if matches!(self.focus, Focus::Candidates) => {
                 (&mut self.candidates_state, self.candidates.len())
             }
             Tab::Library if self.detail.is_none() => {
-                (&mut self.media_state, self.media_items.len())
+                (&mut self.media_state, self.library_view.len())
             }
             Tab::Library => (
                 &mut self.episode_state,
@@ -302,6 +473,15 @@ impl App {
             Tab::History => (&mut self.releases_state, self.releases.len()),
             Tab::Review => (&mut self.review_state, self.review_items.len()),
             Tab::Add => (&mut self.add_results_state, self.add_results.len()),
+            Tab::Stuck => {
+                let report_len = self.stuck.as_ref().map_or((0, 0), |r| {
+                    (r.stalled_grabs.len(), r.maxed_out_search_targets.len())
+                });
+                match self.stuck_focus {
+                    StuckSection::Stalled => (&mut self.stalled_state, report_len.0),
+                    StuckSection::Maxed => (&mut self.maxed_state, report_len.1),
+                }
+            }
             Tab::Profiles if self.profile_detail.is_some() => {
                 (&mut self.profile_weight_state, WEIGHT_FIELDS.len())
             }
@@ -320,10 +500,7 @@ impl App {
         if !matches!(self.tab, Tab::Library) || self.detail.is_some() {
             return;
         }
-        let Some(idx) = self.media_state.selected() else {
-            return;
-        };
-        let Some(item) = self.media_items.get(idx) else {
+        let Some(item) = self.selected_media_item() else {
             return;
         };
         match self.client.media_detail(item.id).await {
@@ -707,6 +884,28 @@ impl App {
         }
     }
 
+    /// Toggles monitored for whatever's selected in the top-level Library
+    /// list, without needing to open its detail view first.
+    pub async fn toggle_monitor_list_selected(&mut self) {
+        let Some(item) = self.selected_media_item() else {
+            return;
+        };
+        let (id, monitored) = (item.id, item.monitored);
+        let result = if monitored {
+            self.client.unmonitor(id).await
+        } else {
+            self.client.monitor(id).await
+        };
+        match result {
+            Ok(()) => {
+                self.status = "monitor state updated".to_string();
+                self.media_items = self.client.list_media().await.unwrap_or_default();
+                self.recompute_library_view();
+            }
+            Err(e) => self.status = format!("monitor toggle failed: {e}"),
+        }
+    }
+
     pub async fn toggle_monitor_selected(&mut self) {
         let Some(detail) = &self.detail else {
             return;
@@ -745,6 +944,7 @@ impl App {
                 self.status = "deleted".to_string();
                 self.detail = None;
                 self.media_items = self.client.list_media().await.unwrap_or_default();
+                self.recompute_library_view();
             }
             Err(e) => self.status = format!("delete failed: {e}"),
         }
@@ -787,6 +987,42 @@ impl App {
                 }
             }
             Err(e) => self.status = format!("file delete failed: {e}"),
+        }
+    }
+
+    /// Jumps from whichever Stuck-tab row is selected straight to that
+    /// show's Library detail view.
+    pub async fn jump_to_stuck_target(&mut self) {
+        let Some(report) = &self.stuck else {
+            return;
+        };
+        let media_item_id = match self.stuck_focus {
+            StuckSection::Maxed => self
+                .maxed_state
+                .selected()
+                .and_then(|i| report.maxed_out_search_targets.get(i))
+                .map(|t| t.media_item_id),
+            StuckSection::Stalled => self
+                .stalled_state
+                .selected()
+                .and_then(|i| report.stalled_grabs.get(i))
+                .map(|g| g.media_item_id),
+        };
+        let Some(id) = media_item_id else {
+            return;
+        };
+        match self.client.media_detail(id).await {
+            Ok(detail) => {
+                self.tab = Tab::Library;
+                self.episode_state.select(if detail.episodes.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                });
+                self.detail = Some(detail);
+                self.focus = Focus::List;
+            }
+            Err(e) => self.status = format!("error loading detail: {e}"),
         }
     }
 }
