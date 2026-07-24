@@ -35,6 +35,17 @@ pub fn target_bitrate_kbps(width: i64, height: i64, cfg: &TranscodeConfig) -> u3
 /// Blocking and slow by design (a real GPU encode, potentially minutes per
 /// file) — callers must run this inside `tokio::task::spawn_blocking`, never
 /// directly on an async task, and never while holding the shared DB mutex.
+///
+/// Known limitation, deliberately not worked around yet: the output
+/// container is always Matroska, and `-c:s copy`/`-c:d copy` stream-copy
+/// whatever subtitle/data tracks the source has. mp4 sources using
+/// `mov_text` subtitles (or certain data streams) aren't valid inside
+/// Matroska and will make the whole `ffmpeg` invocation fail — safely
+/// (the original file is never touched; the job just lands in `failed`
+/// with no space saved for that file), but not silently worked around by
+/// re-encoding or dropping the offending stream. Fixing this properly needs
+/// probing the source's subtitle/data codecs first and choosing per-stream
+/// handling, which wasn't done here rather than risk an unverified fix.
 fn run_ffmpeg_encode(input: &Path, output: &Path, bitrate_kbps: u32, vaapi_device: &str) -> Result<()> {
     let maxrate = bitrate_kbps * 3 / 2;
     let bufsize = bitrate_kbps * 2;
@@ -48,6 +59,11 @@ fn run_ffmpeg_encode(input: &Path, output: &Path, bitrate_kbps: u32, vaapi_devic
         .arg(input)
         .args(["-map", "0"])
         .args(["-c:v", "av1_vaapi"])
+        // Explicit rather than relying on the driver's "auto" inference
+        // from the bitrate flags present — VBR here spends less on simple
+        // scenes and more on complex ones within the maxrate/bufsize
+        // envelope below, rather than a flat per-frame target.
+        .args(["-rc_mode", "VBR"])
         .args(["-b:v", &format!("{bitrate_kbps}k")])
         .args(["-maxrate", &format!("{maxrate}k")])
         .args(["-bufsize", &format!("{bufsize}k")])
@@ -68,6 +84,24 @@ fn run_ffmpeg_encode(input: &Path, output: &Path, bitrate_kbps: u32, vaapi_devic
     Ok(())
 }
 
+/// The temp path a given job's encode writes to — job-id-scoped (not just
+/// derived from the input filename) so two jobs can never collide on the
+/// same temp file even if something ends up processing the same
+/// `episode_file` path twice (e.g. a daemon restart racing a still-live
+/// `transcode-library` backfill process). Also what `reset_orphaned_
+/// running_jobs` uses to find and clean up a crashed job's leftover partial.
+///
+/// Known cosmetic limitation: `finalize_job` renames this over the
+/// original path verbatim, keeping whatever extension the source had — an
+/// `.mp4` source ends up as Matroska bytes at an `.mp4` path (Jellyfin
+/// content-sniffs, so playback isn't affected, but `episode_file.path`'s
+/// extension no longer matches the real container). Not fixed here; would
+/// need the rename plus an `episode_file.path` update done together in
+/// `finalize_job`'s transaction.
+fn temp_path_for(input: &Path, job_id: i64) -> PathBuf {
+    input.with_extension(format!("job{job_id}.av1.mkv"))
+}
+
 /// The blocking half of a transcode: encode to a temp file alongside the
 /// original (same filesystem, required for the atomic rename-based swap
 /// later — never a separate staging drive), then verify the result is
@@ -75,14 +109,32 @@ fn run_ffmpeg_encode(input: &Path, output: &Path, bitrate_kbps: u32, vaapi_devic
 /// file on disk on success (the caller finalizes the swap under the DB
 /// lock); cleans it up itself on any failure, so the original is never at
 /// risk regardless of what goes wrong here.
+///
+/// Returns `Ok(None)` (no encode run at all) if the input turns out to
+/// already be AV1 — checked fresh against the real file here, not trusted
+/// from whatever `media_file_probe` said when the job was claimed. This is
+/// what makes a job that's re-run after a crash between the file-swap
+/// rename and the DB bookkeeping (a narrow but real window — see
+/// `finalize_job`) self-correct into a no-op instead of re-encoding an
+/// already-AV1 file a second time.
 fn encode_and_verify(
     input: PathBuf,
+    job_id: i64,
     cfg: TranscodeConfig,
     width: i64,
     height: i64,
     original_duration: Option<f64>,
-) -> Result<PathBuf> {
-    let tmp_path = input.with_extension("av1.mkv");
+) -> Result<Option<PathBuf>> {
+    match ffprobe::probe(&input) {
+        Ok(p) if p.video_codec.as_deref() == Some("av1") => return Ok(None),
+        // Any other outcome (a different codec, or the probe itself
+        // failing) falls through to a real encode attempt as normal —
+        // this check exists only to short-circuit the one case where
+        // there's provably nothing to do.
+        _ => {}
+    }
+
+    let tmp_path = temp_path_for(&input, job_id);
     let bitrate = target_bitrate_kbps(width, height, &cfg);
 
     run_ffmpeg_encode(&input, &tmp_path, bitrate, &cfg.vaapi_device)?;
@@ -118,7 +170,7 @@ fn encode_and_verify(
         }
     }
 
-    Ok(tmp_path)
+    Ok(Some(tmp_path))
 }
 
 /// Whether `media_item_id` is anime — same two membership checks
@@ -153,7 +205,32 @@ pub fn is_anime(conn: &Connection, media_item_id: i64) -> Result<bool> {
 /// leftover state, they're just still running. Left unreset, a crash leaves
 /// that job's slot permanently uncountable-but-also-unclaimable, quietly
 /// shrinking real capacity forever instead of just costing one retry.
+///
+/// Also sweeps each reset job's expected temp file (`temp_path_for`, which
+/// is job-id-scoped precisely so this lookup is unambiguous) — a killed
+/// encode leaves a partial `.jobN.av1.mkv` behind that nothing else will
+/// ever clean up, and on a library disk that's usually already tight on
+/// space these accumulate for real over a big backfill.
 pub fn reset_orphaned_running_jobs(conn: &Connection) -> Result<usize> {
+    let orphaned: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT j.id, ef.path FROM transcode_job j
+             JOIN episode_file ef ON ef.id = j.episode_file_id
+             WHERE j.status = 'running'",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    for (job_id, path) in &orphaned {
+        let tmp = temp_path_for(Path::new(path), *job_id);
+        if tmp.exists() {
+            if let Err(e) = std::fs::remove_file(&tmp) {
+                tracing::warn!(job_id, path = %tmp.display(), error = %e, "failed to remove orphaned transcode temp file");
+            }
+        }
+    }
+
     let reset = conn.execute(
         "UPDATE transcode_job SET status = 'pending' WHERE status = 'running'",
         [],
@@ -177,6 +254,38 @@ pub fn enqueue(
     Ok(())
 }
 
+/// The single source of truth for "should this freshly-imported file be
+/// queued for transcoding at all" — every enqueue site (`import_one`,
+/// season-pack import) must go through this rather than re-deriving its own
+/// subset of the rules, which is exactly how the post-import hook
+/// originally ended up checking anime but silently skipping the HDR/height
+/// exclusions `find_backlog_candidates` applies to the backfill. Called
+/// after `ensure_probed`, once real ffprobe data (codec/hdr/height) exists
+/// for the file — the codec/hdr/height parameters come from that probe, not
+/// from anything parsed off the release title.
+pub fn should_enqueue(
+    conn: &Connection,
+    media_item_id: i64,
+    video_codec: Option<&str>,
+    hdr: bool,
+    height: Option<i64>,
+    cfg: &TranscodeConfig,
+) -> Result<bool> {
+    if video_codec == Some("av1") {
+        return Ok(false);
+    }
+    if cfg.exclude_hdr && hdr {
+        return Ok(false);
+    }
+    if height.is_some_and(|h| h >= cfg.exclude_min_height as i64) {
+        return Ok(false);
+    }
+    if is_anime(conn, media_item_id)? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// Every existing-library file eligible for the `transcode-library` backfill:
 /// not already AV1, not anime, not HDR/2160p+ (per `cfg.exclude_hdr` /
 /// `cfg.exclude_min_height` — the first pass is scoped to SDR 1080p/720p),
@@ -193,7 +302,7 @@ pub fn find_backlog_candidates(conn: &Connection, cfg: &TranscodeConfig) -> Resu
          WHERE p.video_codec IS NOT NULL AND p.video_codec != 'av1'
            AND (ef.upgrade_locked IS NULL OR ef.upgrade_locked = 0)
            AND (?1 = 0 OR p.hdr = 0)
-           AND (p.height IS NULL OR p.height < ?2)
+           AND (p.height IS NOT NULL AND p.height < ?2)
            AND NOT (
                 (m.tvdb_id IS NOT NULL AND m.tvdb_id IN
                     (SELECT tvdb_id FROM anime_mapping WHERE tvdb_id IS NOT NULL))
@@ -319,10 +428,31 @@ async fn claim_pending_jobs(conn: &Arc<Mutex<Connection>>, limit: usize) -> Resu
 /// AV1 ground truth — same shape as `remux_one_backlog_file`. On failure,
 /// the original is left completely untouched; the job is marked `failed`
 /// with the error recorded, no automatic retry.
-async fn finalize_job(conn: &Arc<Mutex<Connection>>, job: ClaimedJob, encode_result: Result<PathBuf>) -> Result<TranscodeOutcome> {
+///
+/// `Ok(None)` from the encode step means `encode_and_verify` found the
+/// input already AV1 and skipped the encode entirely — marked `done` with
+/// no byte-count change, not `failed`.
+///
+/// The whole swap-and-bookkeeping sequence runs inside a closure so any
+/// failure partway through (a deleted-out-from-under-it original, a
+/// transient I/O error) is caught in one place: the job is marked `failed`
+/// and the temp file is cleaned up, rather than an early `?` propagating
+/// out and silently leaving the job stuck `running` with a leaked temp file
+/// on a disk that's usually already tight on space.
+async fn finalize_job(
+    conn: &Arc<Mutex<Connection>>,
+    job: ClaimedJob,
+    encode_result: Result<Option<PathBuf>>,
+) -> Result<TranscodeOutcome> {
     let conn = conn.lock().await;
-    match encode_result {
-        Ok(tmp_path) => {
+    let tmp_path = match &encode_result {
+        Ok(Some(p)) => Some(p.clone()),
+        _ => None,
+    };
+
+    let swap: Result<TranscodeOutcome> = match encode_result {
+        Ok(None) => Ok(TranscodeOutcome { original_bytes: 0, new_bytes: 0 }),
+        Ok(Some(tmp_path)) => (|| {
             let original_bytes = std::fs::metadata(&job.path)?.len();
             std::fs::rename(&tmp_path, &job.path)?;
             let new_bytes = std::fs::metadata(&job.path)?.len();
@@ -336,14 +466,23 @@ async fn finalize_job(conn: &Arc<Mutex<Connection>>, job: ClaimedJob, encode_res
                 params![job.episode_file_id],
             )?;
             importer::ensure_probed(&conn, job.episode_file_id, &job.path)?;
+            Ok(TranscodeOutcome { original_bytes, new_bytes })
+        })(),
+        Err(e) => Err(e),
+    };
+
+    match swap {
+        Ok(outcome) => {
             conn.execute(
                 "UPDATE transcode_job SET status = 'done', new_bytes = ?1, finished_at = datetime('now') WHERE id = ?2",
-                params![new_bytes as i64, job.job_id],
+                params![outcome.new_bytes as i64, job.job_id],
             )?;
-
-            Ok(TranscodeOutcome { original_bytes, new_bytes })
+            Ok(outcome)
         }
         Err(e) => {
+            if let Some(tmp_path) = tmp_path {
+                let _ = std::fs::remove_file(&tmp_path);
+            }
             conn.execute(
                 "UPDATE transcode_job SET status = 'failed', error = ?1, finished_at = datetime('now') WHERE id = ?2",
                 params![e.to_string(), job.job_id],
@@ -410,9 +549,11 @@ pub async fn run_cycle(
     for job in claimed {
         let cfg = cfg.clone();
         let path = job.path.clone();
+        let job_id = job.job_id;
         let (width, height, duration) = (job.width, job.height, job.duration_secs);
-        let encode_handle =
-            tokio::task::spawn_blocking(move || encode_and_verify(path, cfg, width, height, duration));
+        let encode_handle = tokio::task::spawn_blocking(move || {
+            encode_and_verify(path, job_id, cfg, width, height, duration)
+        });
         handles.push((job, encode_handle));
     }
 
@@ -541,6 +682,43 @@ mod tests {
         let conn = Arc::new(Mutex::new(conn));
         let claimed = claim_pending_jobs(&conn, 2).await.unwrap();
         assert!(claimed.is_empty(), "already at the cap — must not claim more");
+    }
+
+    fn generate_test_clip(dir: &Path, codec: &str) -> PathBuf {
+        let path = dir.join(format!("clip_{codec}.mkv"));
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:duration=1:rate=1"])
+            .args(["-c:v", codec])
+            .arg(&path)
+            .output()
+            .expect("failed to run ffmpeg to generate a test clip");
+        assert!(
+            status.status.success(),
+            "ffmpeg failed to generate a {codec} test clip: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        path
+    }
+
+    // Regression test for a real gap found in review: a crash between the
+    // file-swap rename and the DB bookkeeping in `finalize_job` leaves a job
+    // `running` with the file already AV1 but `media_file_probe` still
+    // stale. On retry, `encode_and_verify` must notice the *actual* file is
+    // already AV1 and skip re-encoding it, rather than trusting the stale
+    // DB probe data it was claimed with.
+    #[test]
+    fn encode_and_verify_skips_a_file_that_is_already_av1() {
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-transcode-already-av1-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = generate_test_clip(&dir, "libsvtav1");
+
+        let result = encode_and_verify(clip.clone(), 999, cfg(), 320, 240, Some(1.0)).unwrap();
+        assert!(result.is_none(), "an already-AV1 file must not be re-encoded");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

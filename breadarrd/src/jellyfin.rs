@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 
+#[derive(Clone)]
 pub struct JellyfinClient {
     base_url: String,
     api_key: String,

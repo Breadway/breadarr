@@ -358,6 +358,16 @@ async fn background_loop(
     let mut upgrade_ticker = tokio::time::interval(std::time::Duration::from_secs(
         config.sources.upgrade_poll_interval_secs,
     ));
+    // Guards against the transcode ticker itself blocking every other cycle
+    // (import, search, upgrade, reconcile) for the full multi-minute
+    // duration of an encode — the ticker below spawns each cycle detached
+    // rather than awaiting it inline, and this is what stops two spawned
+    // cycles from running at once if one is still going when the next tick
+    // fires (a real possibility: files easily take longer to encode than
+    // `poll_interval_secs`). `claim_pending_jobs`'s own concurrency cap
+    // already makes overlap *safe*; this just keeps it from happening
+    // pointlessly.
+    let transcode_busy = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let mut transcode_ticker = tokio::time::interval(std::time::Duration::from_secs(
         config.transcode.poll_interval_secs,
     ));
@@ -420,7 +430,7 @@ async fn background_loop(
             _ = import_ticker.tick() => {
                 let result = {
                     let conn = conn.lock().await;
-                    importer::run_import_cycle(&conn, &qbit, jellyfin.as_ref(), &config.qbit.category, &config.qbit.container_downloads_path, &config.qbit.host_downloads_path, config.transcode.enabled).await
+                    importer::run_import_cycle(&conn, &qbit, jellyfin.as_ref(), &config.qbit.category, &config.qbit.container_downloads_path, &config.qbit.host_downloads_path, config.transcode.enabled.then_some(&config.transcode)).await
                 };
                 if let (Ok(stats), Some(n)) = (&result, &notifier) {
                     if stats.failed > 0 {
@@ -553,18 +563,33 @@ async fn background_loop(
                 if !config.transcode.enabled {
                     continue;
                 }
-                let result = transcode::run_cycle(conn.clone(), config.transcode.clone(), jellyfin.as_ref()).await;
-                let record = match &result {
-                    Ok(stats) => {
-                        info!(?stats, "transcode cycle complete");
-                        api::CycleRecord { at: chrono::Utc::now(), ok: true, detail: format!("{stats:?}") }
-                    }
-                    Err(e) => {
-                        error!(error = %e, "transcode cycle failed");
-                        api::CycleRecord { at: chrono::Utc::now(), ok: false, detail: e.to_string() }
-                    }
+                let Ok(busy_permit) = transcode_busy.clone().try_lock_owned() else {
+                    // A previous cycle is still running (this file's
+                    // encode took longer than one poll interval) — skip
+                    // this tick rather than spawning a second overlapping
+                    // one; the still-running cycle will pick up any newly
+                    // pending jobs on its own next iteration anyway.
+                    continue;
                 };
-                cycle_status.lock().expect("cycle_status poisoned").last_transcode = Some(record);
+                let conn = conn.clone();
+                let cfg = config.transcode.clone();
+                let jellyfin = jellyfin.clone();
+                let cycle_status = cycle_status.clone();
+                tokio::spawn(async move {
+                    let _permit = busy_permit;
+                    let result = transcode::run_cycle(conn, cfg, jellyfin.as_ref()).await;
+                    let record = match &result {
+                        Ok(stats) => {
+                            info!(?stats, "transcode cycle complete");
+                            api::CycleRecord { at: chrono::Utc::now(), ok: true, detail: format!("{stats:?}") }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "transcode cycle failed");
+                            api::CycleRecord { at: chrono::Utc::now(), ok: false, detail: e.to_string() }
+                        }
+                    };
+                    cycle_status.lock().expect("cycle_status poisoned").last_transcode = Some(record);
+                });
             }
             _ = reconcile_ticker.tick() => {
                 let result = {
@@ -879,7 +904,7 @@ async fn debug_import_cycle(config: &Config) -> Result<()> {
         &config.qbit.category,
         &config.qbit.container_downloads_path,
         &config.qbit.host_downloads_path,
-        config.transcode.enabled,
+        config.transcode.enabled.then_some(&config.transcode),
     )
     .await?;
     println!("{stats:?}");

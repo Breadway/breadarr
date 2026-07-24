@@ -1333,7 +1333,7 @@ pub async fn run_import_cycle(
     category: &str,
     container_downloads_path: &str,
     host_downloads_path: &str,
-    transcode_enabled: bool,
+    transcode_cfg: Option<&breadarr_shared::config::TranscodeConfig>,
 ) -> Result<ImportStats> {
     let pending = fetch_pending_grabs(conn)?;
     if pending.is_empty() {
@@ -1361,7 +1361,7 @@ pub async fn run_import_cycle(
         &torrents,
         container_downloads_path,
         host_downloads_path,
-        transcode_enabled,
+        transcode_cfg,
     )?;
 
     if stats.imported > 0 {
@@ -1387,7 +1387,7 @@ fn process_pending_grabs(
     torrents: &[crate::qbit::TorrentInfo],
     container_downloads_path: &str,
     host_downloads_path: &str,
-    transcode_enabled: bool,
+    transcode_cfg: Option<&breadarr_shared::config::TranscodeConfig>,
 ) -> Result<ImportStats> {
     let mut stats = ImportStats::default();
 
@@ -1447,6 +1447,7 @@ fn process_pending_grabs(
                 *season_number,
                 root_folder,
                 &content_path,
+                transcode_cfg,
             ) {
                 Ok(outcome) => {
                     stats.imported += outcome.episodes_imported;
@@ -1475,7 +1476,7 @@ fn process_pending_grabs(
             continue;
         }
 
-        match import_one(conn, grab, &content_path, transcode_enabled) {
+        match import_one(conn, grab, &content_path, transcode_cfg) {
             Ok(ImportOutcome::Imported {
                 remuxed,
                 quality_flagged,
@@ -1526,11 +1527,43 @@ enum ImportOutcome {
     SkippedAlreadyHaveBetter,
 }
 
+/// Shared by every place a freshly-imported file becomes eligible for the
+/// async transcode queue (`import_one`, season-pack import) — reads the
+/// probe data `ensure_probed` just wrote, delegates the actual eligibility
+/// call to `transcode::should_enqueue` (the one place anime/HDR/height/
+/// already-AV1 rules live), and enqueues only if all of that says yes.
+/// Never propagates a failure into the caller's import result — same
+/// "never fail an otherwise-successful import" treatment as probing.
+fn maybe_enqueue_transcode(
+    conn: &Connection,
+    media_item_id: i64,
+    episode_file_id: i64,
+    cfg: &breadarr_shared::config::TranscodeConfig,
+) -> Result<()> {
+    let probe: Option<(Option<String>, i64, Option<i64>, i64)> = conn
+        .query_row(
+            "SELECT video_codec, hdr, height, probe_size_bytes FROM media_file_probe WHERE episode_file_id = ?1",
+            params![episode_file_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((video_codec, hdr, height, size_bytes)) = probe else {
+        // Probing itself failed (recorded as `probe_failed`) — nothing
+        // reliable to decide eligibility from yet; skip rather than guess.
+        return Ok(());
+    };
+
+    if crate::transcode::should_enqueue(conn, media_item_id, video_codec.as_deref(), hdr != 0, height, cfg)? {
+        crate::transcode::enqueue(conn, episode_file_id, video_codec.as_deref(), size_bytes)?;
+    }
+    Ok(())
+}
+
 fn import_one(
     conn: &Connection,
     grab: &PendingGrab,
     content_path: &Path,
-    transcode_enabled: bool,
+    transcode_cfg: Option<&breadarr_shared::config::TranscodeConfig>,
 ) -> Result<ImportOutcome> {
     let source_path = locate_video_file(content_path)?;
     let ext = source_path
@@ -1625,6 +1658,26 @@ fn import_one(
     // quietly replace the better file already in the library. Checked here
     // rather than left to the filesystem to decide by import order.
     if dest.exists() {
+        // Belt-and-suspenders: the missing-content/upgrade search paths
+        // already refuse to re-grab an `upgrade_locked` file (it isn't
+        // "missing" and the upgrade loop skips it), so this shouldn't be
+        // reachable for one today — but a locally AV1-transcoded file
+        // should never be silently overwritten on score alone regardless
+        // of which path produced the incoming grab, same guard as
+        // `import_season_pack_file`'s matching check.
+        let upgrade_locked: i64 = conn
+            .query_row(
+                "SELECT upgrade_locked FROM episode_file WHERE path = ?1",
+                params![dest.to_string_lossy()],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if upgrade_locked != 0 {
+            if remuxed {
+                std::fs::remove_file(&working_path).ok();
+            }
+            return Ok(ImportOutcome::SkippedAlreadyHaveBetter);
+        }
         let current_score: f32 = conn
             .query_row(
                 "SELECT score FROM release WHERE id = ?1",
@@ -1777,29 +1830,9 @@ fn import_one(
     // immediately, exactly as today; the transcode happens later in the
     // background. Never blocks or fails the import itself: enqueue errors
     // are logged and swallowed, same treatment as probing failures above.
-    if transcode_enabled {
-        match crate::transcode::is_anime(conn, grab.media_item_id()) {
-            Ok(true) => {} // Anime excluded until its own encode tuning exists.
-            Ok(false) => {
-                let original_codec: Option<String> = conn
-                    .query_row(
-                        "SELECT video_codec FROM media_file_probe WHERE episode_file_id = ?1",
-                        params![episode_file_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-                if original_codec.as_deref() != Some("av1") {
-                    if let Err(e) =
-                        crate::transcode::enqueue(conn, episode_file_id, original_codec.as_deref(), size_bytes as i64)
-                    {
-                        tracing::warn!(episode_file_id, error = %e, "failed to enqueue transcode job");
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(episode_file_id, error = %e, "failed to check anime status for transcode enqueue");
-            }
+    if let Some(cfg) = transcode_cfg {
+        if let Err(e) = maybe_enqueue_transcode(conn, grab.media_item_id(), episode_file_id, cfg) {
+            tracing::warn!(episode_file_id, error = %e, "failed to check/enqueue transcode job");
         }
     }
 
@@ -1832,6 +1865,7 @@ struct SeasonPackImportOutcome {
 /// double a season pack's import time. Any file that needs it is still
 /// reachable afterward via `remux_backlog`, which sweeps the whole library
 /// including season-pack imports.
+#[allow(clippy::too_many_arguments)]
 fn import_season_pack(
     conn: &Connection,
     release_id: i64,
@@ -1840,6 +1874,7 @@ fn import_season_pack(
     season_number: u32,
     root_folder: &str,
     content_path: &Path,
+    transcode_cfg: Option<&breadarr_shared::config::TranscodeConfig>,
 ) -> Result<SeasonPackImportOutcome> {
     let release_score: f32 = conn
         .query_row(
@@ -1919,6 +1954,7 @@ fn import_season_pack(
             episode_number,
             root_folder,
             source_path,
+            transcode_cfg,
         ) {
             Ok(PackFileOutcome::Imported { quality_flagged }) => {
                 outcome.episodes_imported += 1;
@@ -1999,6 +2035,7 @@ fn import_season_pack_file(
     episode_number: u32,
     root_folder: &str,
     source_path: &Path,
+    transcode_cfg: Option<&breadarr_shared::config::TranscodeConfig>,
 ) -> Result<PackFileOutcome> {
     let ext = source_path
         .extension()
@@ -2027,6 +2064,23 @@ fn import_season_pack_file(
     // already in place.
     let mut old_sibling: Option<PathBuf> = None;
     if dest.exists() {
+        // A locally AV1-transcoded file is a deliberate shrink, not
+        // something a season pack (scored against its own, much larger,
+        // original release) should be allowed to silently overwrite just
+        // because its release score happens to be higher — that score was
+        // never computed against a transcoded file's actual size/quality
+        // tradeoff. Checked before the score comparison, same reasoning as
+        // `movie_eligible_for_upgrade`/`enumerate_upgrade_targets`.
+        let upgrade_locked: i64 = conn
+            .query_row(
+                "SELECT upgrade_locked FROM episode_file WHERE path = ?1",
+                params![dest.to_string_lossy()],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if upgrade_locked != 0 {
+            return Ok(PackFileOutcome::SkippedAlreadyHaveBetter);
+        }
         let existing_best: Option<f32> = conn.query_row(
             "SELECT MAX(score) FROM release WHERE status = 'imported' AND id != ?1 AND episode_id = ?2",
             params![release_id, episode_id],
@@ -2091,6 +2145,12 @@ fn import_season_pack_file(
             false
         }
     };
+
+    if let Some(cfg) = transcode_cfg {
+        if let Err(e) = maybe_enqueue_transcode(conn, media_item_id, episode_file_id, cfg) {
+            tracing::warn!(episode_file_id, error = %e, "failed to check/enqueue transcode job");
+        }
+    }
 
     Ok(PackFileOutcome::Imported { quality_flagged })
 }
@@ -3009,7 +3069,7 @@ mod tests {
             // absent — simulating torrents qBit no longer knows about.
         ];
 
-        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", false).unwrap();
+        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
 
         assert_eq!(stats.imported, 1);
         assert_eq!(stats.skipped_incomplete, 1);
@@ -3071,7 +3131,7 @@ mod tests {
             content_path: "/tmp/somewhere-mid-move".to_string(),
         }];
 
-        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", false).unwrap();
+        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
         assert_eq!(stats.imported, 0);
         assert_eq!(stats.skipped_incomplete, 1);
         assert_eq!(stats.errors, 0);
@@ -3128,7 +3188,7 @@ mod tests {
 
         for i in 1..MAX_IMPORT_ERRORS {
             let pending = fetch_pending_grabs(&conn).unwrap();
-            let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", false).unwrap();
+            let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
             assert_eq!(stats.errors, 1, "iteration {i}");
             assert_eq!(stats.failed, 0, "iteration {i}");
             let status: String = conn
@@ -3139,7 +3199,7 @@ mod tests {
 
         // The Nth failure crosses the threshold and gives up.
         let pending = fetch_pending_grabs(&conn).unwrap();
-        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", false).unwrap();
+        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
         assert_eq!(stats.failed, 1);
         assert_eq!(stats.errors, 0);
         let status: String = conn
@@ -3193,7 +3253,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        let outcome = import_one(&conn, &grab, &content, false).unwrap();
+        let outcome = import_one(&conn, &grab, &content, None).unwrap();
         let ImportOutcome::Imported { remuxed, .. } = outcome else {
             panic!("expected a real import, got a skip");
         };
@@ -3274,7 +3334,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        import_one(&conn, &grab, &content, true).unwrap();
+        import_one(&conn, &grab, &content, Some(&breadarr_shared::config::TranscodeConfig::default())).unwrap();
 
         let episode_file_id: i64 = conn
             .query_row(
@@ -3350,7 +3410,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        import_one(&conn, &grab, &content, true).unwrap();
+        import_one(&conn, &grab, &content, Some(&breadarr_shared::config::TranscodeConfig::default())).unwrap();
 
         let job_count: i64 = conn
             .query_row("SELECT count(*) FROM transcode_job", [], |r| r.get(0))
@@ -3415,7 +3475,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        let outcome = import_one(&conn, &grab, &content, false).unwrap();
+        let outcome = import_one(&conn, &grab, &content, None).unwrap();
         assert!(matches!(outcome, ImportOutcome::Imported { .. }));
 
         let dest = dest_root.join("Season 03").join("Some Show - S03E02.mp4");
@@ -3479,7 +3539,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        let outcome = import_one(&conn, &grab, &content, false).unwrap();
+        let outcome = import_one(&conn, &grab, &content, None).unwrap();
         let ImportOutcome::Imported {
             quality_flagged, ..
         } = outcome
@@ -3689,7 +3749,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        let outcome = import_one(&conn, &grab, &content, false).unwrap();
+        let outcome = import_one(&conn, &grab, &content, None).unwrap();
         assert!(matches!(outcome, ImportOutcome::SkippedAlreadyHaveBetter));
 
         // The existing better file must be untouched, not overwritten.
@@ -3767,7 +3827,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        let outcome = import_one(&conn, &grab, &content, false).unwrap();
+        let outcome = import_one(&conn, &grab, &content, None).unwrap();
         assert!(matches!(outcome, ImportOutcome::Imported { .. }));
 
         // The new file's content landed at the shared deterministic path.
@@ -3865,6 +3925,7 @@ mod tests {
             1,
             &dest_root.to_string_lossy(),
             &pack_dir,
+            None,
         )
         .unwrap();
 
@@ -3941,6 +4002,7 @@ mod tests {
             1,
             &dest_root.to_string_lossy(),
             &pack_dir,
+            None,
         )
         .unwrap();
 
@@ -3952,6 +4014,63 @@ mod tests {
             "episode 1's better file must survive untouched"
         );
         assert!(season_dir.join("Some Show - S01E02.mkv").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn import_season_pack_skips_an_upgrade_locked_episode_even_with_a_lower_scoring_existing_release() {
+        let conn = seeded_season_pack_conn(2);
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-season-pack-locked-{}",
+            std::process::id()
+        ));
+        let pack_dir = dir.join("pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(pack_dir.join("Show.S01E01.mkv"), b"new e01").unwrap();
+        std::fs::write(pack_dir.join("Show.S01E02.mkv"), b"new e02").unwrap();
+        let dest_root = dir.join("library");
+        let season_dir = dest_root.join("Season 01");
+        std::fs::create_dir_all(&season_dir).unwrap();
+
+        // Episode 1's existing release scores *lower* than the incoming
+        // pack (5.0 vs the pack's 15.0) — on score alone this would be
+        // overwritten. It's also `upgrade_locked` (a completed local AV1
+        // transcode), which must take priority over the score comparison.
+        conn.execute(
+            "INSERT INTO release (id, media_item_id, episode_id, raw_title, source_id, guid, score, status, torrent_hash, grabbed_at)
+             VALUES (2, 1, 1, 'Some Show S01E01 1080p', 1, 'guid-2', 5.0, 'imported', 'bbbb', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let existing = season_dir.join("Some Show - S01E01.mkv");
+        std::fs::write(&existing, b"locally-transcoded e01").unwrap();
+        conn.execute(
+            "INSERT INTO episode_file (episode_id, media_item_id, path, size_bytes, subtitle_status, upgrade_locked)
+             VALUES (1, NULL, ?1, 23, 'none', 1)",
+            params![existing.to_string_lossy()],
+        )
+        .unwrap();
+
+        let outcome = import_season_pack(
+            &conn,
+            1,
+            1,
+            "Some Show",
+            1,
+            &dest_root.to_string_lossy(),
+            &pack_dir,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.episodes_imported, 1); // only episode 2
+        assert_eq!(outcome.episodes_already_had_better, 1); // episode 1 skipped despite the lower score
+        assert_eq!(
+            std::fs::read(&existing).unwrap(),
+            b"locally-transcoded e01",
+            "the locked, locally-transcoded file must survive untouched regardless of score"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3978,6 +4097,7 @@ mod tests {
             1,
             &dest_root.to_string_lossy(),
             &pack_dir,
+            None,
         );
         assert!(result.is_err());
 

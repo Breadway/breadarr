@@ -372,7 +372,13 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
              queued_at        TEXT NOT NULL,
              finished_at      TEXT
          );
-         CREATE INDEX IF NOT EXISTS idx_transcode_job_status ON transcode_job(status);",
+         CREATE INDEX IF NOT EXISTS idx_transcode_job_status ON transcode_job(status);
+         -- Prevents two jobs for the same file ever being active at once —
+         -- closes the door on the same file getting encoded twice
+         -- concurrently regardless of how it happened (a stray duplicate
+         -- enqueue, a daemon-restart reset racing a still-alive backfill).
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_transcode_job_active_episode_file
+             ON transcode_job(episode_file_id) WHERE status IN ('pending','running');",
     )?;
 
     // Progress watermark for stalled-download detection (added after the
