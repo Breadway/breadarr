@@ -353,7 +353,26 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
              fetched_at     TEXT    NOT NULL
          );
          CREATE INDEX IF NOT EXISTS idx_torrent_fetch_hash ON torrent_fetch(torrent_hash);
-         CREATE INDEX IF NOT EXISTS idx_torrent_fetch_fetched_at ON torrent_fetch(fetched_at);",
+         CREATE INDEX IF NOT EXISTS idx_torrent_fetch_fetched_at ON torrent_fetch(fetched_at);
+
+         -- One row per file queued for AV1 transcoding, whether from the
+         -- post-import async hook or the `transcode-library` backfill sweep.
+         -- Persisted (not an in-memory queue) so a `pending`/`running` row
+         -- left over from a daemon crash mid-encode just gets picked up
+         -- again on the next tick instead of silently vanishing.
+         CREATE TABLE IF NOT EXISTS transcode_job (
+             id               INTEGER PRIMARY KEY,
+             episode_file_id  INTEGER NOT NULL REFERENCES episode_file(id) ON DELETE CASCADE,
+             status           TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending','running','done','failed','skipped')),
+             original_codec   TEXT,
+             original_bytes   INTEGER,
+             new_bytes        INTEGER,
+             error            TEXT,
+             queued_at        TEXT NOT NULL,
+             finished_at      TEXT
+         );
+         CREATE INDEX IF NOT EXISTS idx_transcode_job_status ON transcode_job(status);",
     )?;
 
     // Progress watermark for stalled-download detection (added after the
@@ -410,6 +429,18 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
     // anything not already worth its own column (chapters, encoder tag,
     // less-common stream metadata). See `ffprobe::MediaProbe::raw_json`.
     add_column_if_missing(conn, "media_file_probe", "raw_ffprobe_json", "TEXT")?;
+
+    // Set once a file has been through a successful local AV1 transcode —
+    // stops the upgrade cycle from treating it as still needing a bigger
+    // HEVC/H264 release, since `best_existing_score` otherwise only ever
+    // sees the stored `release.score` from original-grab time, which a
+    // local re-encode never touches.
+    add_column_if_missing(
+        conn,
+        "episode_file",
+        "upgrade_locked",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
 
     Ok(())
 }
@@ -473,7 +504,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(table_count, 17);
+        assert_eq!(table_count, 18);
     }
 
     #[test]

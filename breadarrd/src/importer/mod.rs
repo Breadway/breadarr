@@ -1325,6 +1325,7 @@ async fn wait_for_relocation(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_import_cycle(
     conn: &Connection,
     qbit: &QbitClient,
@@ -1332,6 +1333,7 @@ pub async fn run_import_cycle(
     category: &str,
     container_downloads_path: &str,
     host_downloads_path: &str,
+    transcode_enabled: bool,
 ) -> Result<ImportStats> {
     let pending = fetch_pending_grabs(conn)?;
     if pending.is_empty() {
@@ -1359,6 +1361,7 @@ pub async fn run_import_cycle(
         &torrents,
         container_downloads_path,
         host_downloads_path,
+        transcode_enabled,
     )?;
 
     if stats.imported > 0 {
@@ -1384,6 +1387,7 @@ fn process_pending_grabs(
     torrents: &[crate::qbit::TorrentInfo],
     container_downloads_path: &str,
     host_downloads_path: &str,
+    transcode_enabled: bool,
 ) -> Result<ImportStats> {
     let mut stats = ImportStats::default();
 
@@ -1471,7 +1475,7 @@ fn process_pending_grabs(
             continue;
         }
 
-        match import_one(conn, grab, &content_path) {
+        match import_one(conn, grab, &content_path, transcode_enabled) {
             Ok(ImportOutcome::Imported {
                 remuxed,
                 quality_flagged,
@@ -1522,7 +1526,12 @@ enum ImportOutcome {
     SkippedAlreadyHaveBetter,
 }
 
-fn import_one(conn: &Connection, grab: &PendingGrab, content_path: &Path) -> Result<ImportOutcome> {
+fn import_one(
+    conn: &Connection,
+    grab: &PendingGrab,
+    content_path: &Path,
+    transcode_enabled: bool,
+) -> Result<ImportOutcome> {
     let source_path = locate_video_file(content_path)?;
     let ext = source_path
         .extension()
@@ -1761,6 +1770,37 @@ fn import_one(conn: &Connection, grab: &PendingGrab, content_path: &Path) -> Res
                 dest.display()
             ),
         )?;
+    }
+
+    // Queue this freshly-imported file for the async AV1 transcode swap
+    // (see `transcode::run_cycle`) — the file is available in the library
+    // immediately, exactly as today; the transcode happens later in the
+    // background. Never blocks or fails the import itself: enqueue errors
+    // are logged and swallowed, same treatment as probing failures above.
+    if transcode_enabled {
+        match crate::transcode::is_anime(conn, grab.media_item_id()) {
+            Ok(true) => {} // Anime excluded until its own encode tuning exists.
+            Ok(false) => {
+                let original_codec: Option<String> = conn
+                    .query_row(
+                        "SELECT video_codec FROM media_file_probe WHERE episode_file_id = ?1",
+                        params![episode_file_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                if original_codec.as_deref() != Some("av1") {
+                    if let Err(e) =
+                        crate::transcode::enqueue(conn, episode_file_id, original_codec.as_deref(), size_bytes as i64)
+                    {
+                        tracing::warn!(episode_file_id, error = %e, "failed to enqueue transcode job");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(episode_file_id, error = %e, "failed to check anime status for transcode enqueue");
+            }
+        }
     }
 
     Ok(ImportOutcome::Imported {
@@ -2969,7 +3009,7 @@ mod tests {
             // absent — simulating torrents qBit no longer knows about.
         ];
 
-        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "").unwrap();
+        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", false).unwrap();
 
         assert_eq!(stats.imported, 1);
         assert_eq!(stats.skipped_incomplete, 1);
@@ -3031,7 +3071,7 @@ mod tests {
             content_path: "/tmp/somewhere-mid-move".to_string(),
         }];
 
-        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "").unwrap();
+        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", false).unwrap();
         assert_eq!(stats.imported, 0);
         assert_eq!(stats.skipped_incomplete, 1);
         assert_eq!(stats.errors, 0);
@@ -3088,7 +3128,7 @@ mod tests {
 
         for i in 1..MAX_IMPORT_ERRORS {
             let pending = fetch_pending_grabs(&conn).unwrap();
-            let stats = process_pending_grabs(&conn, &pending, &torrents, "", "").unwrap();
+            let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", false).unwrap();
             assert_eq!(stats.errors, 1, "iteration {i}");
             assert_eq!(stats.failed, 0, "iteration {i}");
             let status: String = conn
@@ -3099,7 +3139,7 @@ mod tests {
 
         // The Nth failure crosses the threshold and gives up.
         let pending = fetch_pending_grabs(&conn).unwrap();
-        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "").unwrap();
+        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", false).unwrap();
         assert_eq!(stats.failed, 1);
         assert_eq!(stats.errors, 0);
         let status: String = conn
@@ -3153,7 +3193,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        let outcome = import_one(&conn, &grab, &content).unwrap();
+        let outcome = import_one(&conn, &grab, &content, false).unwrap();
         let ImportOutcome::Imported { remuxed, .. } = outcome else {
             panic!("expected a real import, got a skip");
         };
@@ -3189,6 +3229,133 @@ mod tests {
             )
             .unwrap();
         assert_eq!(event_type, "imported");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn import_one_enqueues_a_transcode_job_when_transcode_is_enabled() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_item (id, kind, title, year, monitored, quality_profile_id, root_folder)
+             VALUES (1, 'movie', 'Some Movie', 2016, 1, 1, '/tmp')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source (id, name, kind, base_url) VALUES (1, 'tpb', 'scrape', 'http://x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO release (id, media_item_id, episode_id, raw_title, source_id, guid, status, torrent_hash, grabbed_at)
+             VALUES (1, 1, NULL, 'Some Movie 2016 1080p', 1, 'guid-1', 'grabbed', 'deadbeef', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-transcode-enqueue-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest_root = dir.join("library");
+        std::fs::create_dir_all(&dest_root).unwrap();
+        let content = dir.join("Some.Movie.2016.1080p.mp4");
+        std::fs::write(&content, b"fake movie data").unwrap();
+
+        let grab = PendingGrab::Movie {
+            release_id: 1,
+            media_item_id: 1,
+            torrent_hash: "deadbeef".to_string(),
+            title: "Some Movie".to_string(),
+            year: Some(2016),
+            root_folder: dest_root.to_string_lossy().to_string(),
+        };
+
+        import_one(&conn, &grab, &content, true).unwrap();
+
+        let episode_file_id: i64 = conn
+            .query_row(
+                "SELECT id FROM episode_file WHERE media_item_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let job_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM transcode_job WHERE episode_file_id = ?1 AND status = 'pending'",
+                params![episode_file_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(job_count, 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn import_one_does_not_enqueue_a_transcode_job_for_anime() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_item (id, kind, title, tvdb_id, monitored, quality_profile_id, root_folder)
+             VALUES (1, 'series', 'Some Anime', 999, 1, 1, '/tmp')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO anime_mapping (anidb_id, tvdb_id) VALUES (1, 999)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file)
+             VALUES (1, 1, 1, 1, 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source (id, name, kind, base_url) VALUES (1, 'nyaa', 'rss', 'http://x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO release (id, media_item_id, episode_id, raw_title, source_id, guid, status, torrent_hash, grabbed_at)
+             VALUES (1, 1, 1, 'Some Anime S01E01', 1, 'guid-1', 'grabbed', 'deadbeef', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-transcode-anime-skip-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest_root = dir.join("library");
+        std::fs::create_dir_all(&dest_root).unwrap();
+        let content = dir.join("Some.Anime.S01E01.mp4");
+        std::fs::write(&content, b"fake anime data").unwrap();
+
+        let grab = PendingGrab::Episode {
+            release_id: 1,
+            media_item_id: 1,
+            episode_id: 1,
+            torrent_hash: "deadbeef".to_string(),
+            series_title: "Some Anime".to_string(),
+            season_number: 1,
+            episode_number: 1,
+            episode_title: None,
+            root_folder: dest_root.to_string_lossy().to_string(),
+        };
+
+        import_one(&conn, &grab, &content, true).unwrap();
+
+        let job_count: i64 = conn
+            .query_row("SELECT count(*) FROM transcode_job", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(job_count, 0);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3248,7 +3415,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        let outcome = import_one(&conn, &grab, &content).unwrap();
+        let outcome = import_one(&conn, &grab, &content, false).unwrap();
         assert!(matches!(outcome, ImportOutcome::Imported { .. }));
 
         let dest = dest_root.join("Season 03").join("Some Show - S03E02.mp4");
@@ -3312,7 +3479,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        let outcome = import_one(&conn, &grab, &content).unwrap();
+        let outcome = import_one(&conn, &grab, &content, false).unwrap();
         let ImportOutcome::Imported {
             quality_flagged, ..
         } = outcome
@@ -3522,7 +3689,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        let outcome = import_one(&conn, &grab, &content).unwrap();
+        let outcome = import_one(&conn, &grab, &content, false).unwrap();
         assert!(matches!(outcome, ImportOutcome::SkippedAlreadyHaveBetter));
 
         // The existing better file must be untouched, not overwritten.
@@ -3600,7 +3767,7 @@ mod tests {
             root_folder: dest_root.to_string_lossy().to_string(),
         };
 
-        let outcome = import_one(&conn, &grab, &content).unwrap();
+        let outcome = import_one(&conn, &grab, &content, false).unwrap();
         assert!(matches!(outcome, ImportOutcome::Imported { .. }));
 
         // The new file's content landed at the shared deterministic path.

@@ -11,6 +11,7 @@ mod qbit;
 mod scheduler;
 mod scoring;
 mod sources;
+mod transcode;
 
 use std::env;
 
@@ -113,6 +114,9 @@ async fn main() -> Result<()> {
         }
         Some("probe-library") => {
             return probe_library_cmd(&config).await;
+        }
+        Some("transcode-library") => {
+            return transcode_library_cmd(&config).await;
         }
         Some("verify-library") => {
             return verify_library_cmd(&config).await;
@@ -349,6 +353,9 @@ async fn background_loop(
     let mut upgrade_ticker = tokio::time::interval(std::time::Duration::from_secs(
         config.sources.upgrade_poll_interval_secs,
     ));
+    let mut transcode_ticker = tokio::time::interval(std::time::Duration::from_secs(
+        config.transcode.poll_interval_secs,
+    ));
     // Disk state doesn't change on its own — hourly is plenty to catch a
     // file deleted/moved by hand without adding meaningful load (one query
     // per tracked episode file, all local). Deliberately does *not* fire at
@@ -366,6 +373,7 @@ async fn background_loop(
     search_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     upgrade_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     reconcile_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    transcode_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     // Cycle-level backoff on top of the search loop's own per-mirror
     // cooldowns: a whole cycle failing (source exhausted, or an outright
@@ -407,7 +415,7 @@ async fn background_loop(
             _ = import_ticker.tick() => {
                 let result = {
                     let conn = conn.lock().await;
-                    importer::run_import_cycle(&conn, &qbit, jellyfin.as_ref(), &config.qbit.category, &config.qbit.container_downloads_path, &config.qbit.host_downloads_path).await
+                    importer::run_import_cycle(&conn, &qbit, jellyfin.as_ref(), &config.qbit.category, &config.qbit.container_downloads_path, &config.qbit.host_downloads_path, config.transcode.enabled).await
                 };
                 if let (Ok(stats), Some(n)) = (&result, &notifier) {
                     if stats.failed > 0 {
@@ -535,6 +543,23 @@ async fn background_loop(
                         )).await;
                     }
                 }
+            }
+            _ = transcode_ticker.tick() => {
+                if !config.transcode.enabled {
+                    continue;
+                }
+                let result = transcode::run_cycle(conn.clone(), config.transcode.clone(), jellyfin.as_ref()).await;
+                let record = match &result {
+                    Ok(stats) => {
+                        info!(?stats, "transcode cycle complete");
+                        api::CycleRecord { at: chrono::Utc::now(), ok: true, detail: format!("{stats:?}") }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "transcode cycle failed");
+                        api::CycleRecord { at: chrono::Utc::now(), ok: false, detail: e.to_string() }
+                    }
+                };
+                cycle_status.lock().expect("cycle_status poisoned").last_transcode = Some(record);
             }
             _ = reconcile_ticker.tick() => {
                 let result = {
@@ -849,6 +874,7 @@ async fn debug_import_cycle(config: &Config) -> Result<()> {
         &config.qbit.category,
         &config.qbit.container_downloads_path,
         &config.qbit.host_downloads_path,
+        config.transcode.enabled,
     )
     .await?;
     println!("{stats:?}");
@@ -1172,6 +1198,69 @@ async fn probe_library_cmd(config: &Config) -> Result<()> {
         }
     }
     println!("done: {total_probed} probed total, {total_failed} failed total");
+    Ok(())
+}
+
+/// One-time backfill: enqueues every existing-library file eligible for
+/// AV1 transcoding (see `transcode::find_backlog_candidates` for the exact
+/// eligibility rules — not already AV1, not anime, not HDR/2160p+ per the
+/// first pass's scope) as a `transcode_job` row, then drives the same
+/// worker loop the daemon's steady-state ticker uses
+/// (`transcode::run_cycle`) until nothing is left pending. Shares that one
+/// code path deliberately — there is exactly one place that actually runs
+/// an encode, whether triggered by a backlog sweep or a fresh grab.
+async fn transcode_library_cmd(config: &Config) -> Result<()> {
+    if !config.transcode.enabled {
+        bail!("transcode.enabled is false in config — enable it before running a backfill");
+    }
+    if let Some(parent) = config.db_path().parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(config.db_path())?;
+    db::init(&conn)?;
+
+    let candidates = transcode::find_backlog_candidates(&conn, &config.transcode)?;
+    println!(
+        "found {} backlog candidate(s), highest-bitrate first",
+        candidates.len()
+    );
+    for candidate in &candidates {
+        transcode::enqueue(
+            &conn,
+            candidate.episode_file_id,
+            candidate.video_codec.as_deref(),
+            candidate.size_bytes,
+        )?;
+    }
+
+    let jellyfin = if config.jellyfin.base_url.is_empty() {
+        None
+    } else {
+        Some(JellyfinClient::new(
+            config.jellyfin.base_url.clone(),
+            config.jellyfin.api_key.clone(),
+        ))
+    };
+
+    let conn = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
+    let mut total_succeeded = 0usize;
+    let mut total_failed = 0usize;
+    let mut total_bytes_saved: i64 = 0;
+    loop {
+        let stats =
+            transcode::run_cycle(conn.clone(), config.transcode.clone(), jellyfin.as_ref()).await?;
+        if stats.attempted == 0 {
+            break;
+        }
+        total_succeeded += stats.succeeded;
+        total_failed += stats.failed;
+        total_bytes_saved += stats.bytes_saved;
+        println!("batch: {stats:?}");
+    }
+    println!(
+        "done: {total_succeeded} succeeded, {total_failed} failed, {:.1} GB saved total",
+        total_bytes_saved as f64 / 1_073_741_824.0
+    );
     Ok(())
 }
 

@@ -23,6 +23,8 @@ pub struct Config {
     pub sources: SourcesConfig,
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    #[serde(default)]
+    pub transcode: TranscodeConfig,
 }
 
 /// Where the TUI's "add show" flow places new series by default. Sonarr/
@@ -275,6 +277,114 @@ pub struct JellyfinConfig {
     pub base_url: String,
     #[serde(default)]
     pub api_key: String,
+}
+
+/// GPU-accelerated AV1 transcode: re-encodes freshly-grabbed and existing
+/// library files down to a space-reasonable size instead of keeping
+/// whatever the source release happened to be (REMUX, huge season packs,
+/// etc). `enabled` defaults false — this needs a manual calibration pass
+/// against real content on the target GPU before it's safe to run
+/// unattended against a whole library.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TranscodeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Tight on purpose — the actual pace is bottlenecked by encode time
+    /// (minutes per file), not this interval; a short poll just means a
+    /// freshly-completed job's slot gets refilled promptly instead of
+    /// sitting idle for the rest of a longer interval.
+    #[serde(default = "default_transcode_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_vaapi_device")]
+    pub vaapi_device: String,
+    #[serde(default = "default_parallelism_min")]
+    pub parallelism_min: usize,
+    /// Ramp-up ceiling for concurrent encode streams during a backfill —
+    /// tune this against how many simultaneous `av1_vaapi` sessions the
+    /// target GPU can actually sustain before per-stream throughput starts
+    /// dropping, not just picked arbitrarily.
+    #[serde(default = "default_parallelism_max")]
+    pub parallelism_max: usize,
+    /// The "looks fine, no complaints" calibration reference: a real
+    /// bitrate (Mbps, in kbps here) from content already in the library at
+    /// `reference_height` that the user is happy with. New AV1 encodes are
+    /// targeted relative to this, scaled by resolution and AV1's encoding
+    /// efficiency, rather than picking a bitrate out of thin air.
+    #[serde(default = "default_reference_bitrate_kbps")]
+    pub reference_bitrate_kbps: u32,
+    #[serde(default = "default_reference_height")]
+    pub reference_height: u32,
+    /// AV1 reaches equivalent perceived quality to HEVC at a meaningfully
+    /// lower bitrate — this factor is applied on top of the resolution
+    /// scaling so the AV1 target isn't just a like-for-like copy of the
+    /// HEVC/H264 reference bitrate. Conservative (not maximally aggressive)
+    /// on purpose: erring toward "still clearly smaller" over "as small as
+    /// AV1 could theoretically go" leaves margin against visible artifacts.
+    #[serde(default = "default_av1_efficiency_factor")]
+    pub av1_efficiency_factor: f32,
+    /// HDR10/Dolby Vision metadata preservation through the GPU encoder
+    /// hasn't been verified yet — excluded from both the backfill and the
+    /// post-grab path until that's specifically checked on a few samples.
+    #[serde(default = "default_exclude_hdr")]
+    pub exclude_hdr: bool,
+    /// Excludes the 2160p tier from the first pass for the same reason as
+    /// `exclude_hdr` (most current 4K content in this library is HDR
+    /// anyway) — revisit once HDR handling is confirmed safe.
+    #[serde(default = "default_exclude_min_height")]
+    pub exclude_min_height: u32,
+}
+
+impl Default for TranscodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: default_transcode_poll_interval_secs(),
+            vaapi_device: default_vaapi_device(),
+            parallelism_min: default_parallelism_min(),
+            parallelism_max: default_parallelism_max(),
+            reference_bitrate_kbps: default_reference_bitrate_kbps(),
+            reference_height: default_reference_height(),
+            av1_efficiency_factor: default_av1_efficiency_factor(),
+            exclude_hdr: default_exclude_hdr(),
+            exclude_min_height: default_exclude_min_height(),
+        }
+    }
+}
+
+fn default_transcode_poll_interval_secs() -> u64 {
+    60
+}
+
+fn default_vaapi_device() -> String {
+    "/dev/dri/renderD128".to_string()
+}
+
+fn default_parallelism_min() -> usize {
+    1
+}
+
+fn default_parallelism_max() -> usize {
+    4
+}
+
+fn default_reference_bitrate_kbps() -> u32 {
+    5320
+}
+
+fn default_reference_height() -> u32 {
+    1080
+}
+
+fn default_av1_efficiency_factor() -> f32 {
+    0.7
+}
+
+fn default_exclude_hdr() -> bool {
+    true
+}
+
+fn default_exclude_min_height() -> u32 {
+    2000
 }
 
 /// TVDB v4 API key, exchanged for a short-lived JWT at request time.

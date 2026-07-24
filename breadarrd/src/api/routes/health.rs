@@ -20,6 +20,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthDetail> {
         last_import_cycle: status.last_import.as_ref().map(to_info),
         last_search_cycle: status.last_search.as_ref().map(to_info),
         last_upgrade_cycle: status.last_upgrade.as_ref().map(to_info),
+        last_transcode_cycle: status.last_transcode.as_ref().map(to_info),
         search_halted: status.search_halted,
     })
 }

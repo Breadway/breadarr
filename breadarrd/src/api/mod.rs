@@ -78,6 +78,7 @@ pub struct CycleStatus {
     pub last_import: Option<CycleRecord>,
     pub last_search: Option<CycleRecord>,
     pub last_upgrade: Option<CycleRecord>,
+    pub last_transcode: Option<CycleRecord>,
     /// Set once the search-driven loop's consecutive-failure backoff hits
     /// its ceiling — still ticking at max backoff underneath (self-healing
     /// if the source recovers), but worth a loud, easy-to-spot signal that

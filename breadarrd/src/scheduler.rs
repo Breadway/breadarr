@@ -222,7 +222,22 @@ fn movie_eligible_for_upgrade(conn: &Connection, media_item_id: i64) -> Result<b
         params![media_item_id],
         |row| row.get(0),
     )?;
-    Ok(in_flight == 0)
+    if in_flight > 0 {
+        return Ok(false);
+    }
+    // Same reasoning as the `upgrade_locked` check in
+    // `enumerate_upgrade_targets`: a locally AV1-transcoded file is a
+    // deliberate shrink, not something the upgrade loop should try to
+    // replace with the next bigger HEVC/x264 release it finds.
+    let upgrade_locked: i64 = conn
+        .query_row(
+            "SELECT upgrade_locked FROM episode_file
+             WHERE media_item_id = ?1 AND episode_id IS NULL",
+            params![media_item_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    Ok(upgrade_locked == 0)
 }
 
 fn is_anime(conn: &Connection, tvdb_id: i64) -> Result<bool> {
@@ -1170,6 +1185,7 @@ fn enumerate_upgrade_targets(
                 (SELECT tvdb_id FROM anime_mapping WHERE tvdb_id IS NOT NULL))
            AND NOT EXISTS (SELECT 1 FROM release r WHERE r.episode_id = e.id
                            AND r.status IN ('grabbed','downloading'))
+           AND (ef.upgrade_locked IS NULL OR ef.upgrade_locked = 0)
            AND (us.last_checked_at IS NULL OR {})",
         UPGRADE_DUE_CLAUSE
             .replace("last_checked_at", "us.last_checked_at")
@@ -2318,6 +2334,22 @@ mod tests {
     }
 
     #[test]
+    fn enumerate_upgrade_targets_excludes_an_upgrade_locked_episode() {
+        let conn = seeded_upgrade_conn_with_one_flagged_episode();
+        // Episode 2 is the probe-flagged one that would otherwise sort
+        // first — lock it (as a completed local AV1 transcode would) and
+        // confirm it drops out entirely rather than just losing priority.
+        conn.execute(
+            "UPDATE episode_file SET upgrade_locked = 1 WHERE episode_id = 2",
+            [],
+        )
+        .unwrap();
+        let targets = enumerate_upgrade_targets(&conn, 10, 5.0).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].episode_id, Some(1));
+    }
+
+    #[test]
     fn record_grab_writes_both_a_release_row_and_a_torrent_fetch_audit_row() {
         let conn = seeded_conn();
         conn.execute(
@@ -2584,6 +2616,20 @@ mod tests {
         // Unlike `movie_needs_grab`, having a file already doesn't disqualify
         // an upgrade check — that's the whole point of the upgrade path.
         assert!(movie_eligible_for_upgrade(&conn, 1).unwrap());
+    }
+
+    #[test]
+    fn movie_eligible_for_upgrade_is_false_once_upgrade_locked() {
+        let conn = seeded_movie_conn();
+        conn.execute(
+            "INSERT INTO episode_file (media_item_id, episode_id, path, size_bytes, upgrade_locked)
+             VALUES (1, NULL, '/tmp/movie.mkv', 100, 1)",
+            [],
+        )
+        .unwrap();
+        // A locally AV1-transcoded file is a deliberate shrink, not
+        // something the upgrade loop should try to replace.
+        assert!(!movie_eligible_for_upgrade(&conn, 1).unwrap());
     }
 
     #[test]

@@ -143,6 +143,7 @@ pub struct HealthDetail {
     pub last_import_cycle: Option<CycleInfo>,
     pub last_search_cycle: Option<CycleInfo>,
     pub last_upgrade_cycle: Option<CycleInfo>,
+    pub last_transcode_cycle: Option<CycleInfo>,
     pub search_halted: bool,
 }
 
