@@ -55,6 +55,12 @@ pub struct SourcesConfig {
     pub nyaa_rss_url: String,
     #[serde(default = "default_grab_poll_interval_secs")]
     pub grab_poll_interval_secs: u64,
+    /// Human kill switch for the passive RSS-feed grab loop (nyaa, anime
+    /// only) — same reasoning as `search_enabled`/`upgrade_enabled`, kept
+    /// as its own flag since this loop watches a different source and can
+    /// need to be paused independently of the search-driven ones.
+    #[serde(default = "default_grab_enabled")]
+    pub grab_enabled: bool,
     #[serde(default = "default_import_poll_interval_secs")]
     pub import_poll_interval_secs: u64,
     #[serde(default = "default_search_poll_interval_secs")]
@@ -108,6 +114,7 @@ impl Default for SourcesConfig {
             torrent_1337x_mirrors: default_1337x_mirrors(),
             nyaa_rss_url: default_nyaa_rss_url(),
             grab_poll_interval_secs: default_grab_poll_interval_secs(),
+            grab_enabled: default_grab_enabled(),
             import_poll_interval_secs: default_import_poll_interval_secs(),
             search_poll_interval_secs: default_search_poll_interval_secs(),
             search_budget_per_cycle: default_search_budget_per_cycle(),
@@ -159,6 +166,10 @@ fn default_nyaa_rss_url() -> String {
 
 fn default_grab_poll_interval_secs() -> u64 {
     300
+}
+
+fn default_grab_enabled() -> bool {
+    true
 }
 
 fn default_import_poll_interval_secs() -> u64 {

@@ -378,6 +378,9 @@ async fn background_loop(
     loop {
         tokio::select! {
             _ = grab_ticker.tick() => {
+                if !config.sources.grab_enabled {
+                    continue;
+                }
                 let result = {
                     let conn = conn.lock().await;
                     scheduler::run_grab_cycle(&conn, &nyaa_source, 1, &mut title_matcher, &qbit, &config.qbit.category).await
