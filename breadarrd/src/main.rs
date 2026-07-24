@@ -142,6 +142,11 @@ async fn run_daemon(config: Config) -> Result<()> {
     let conn = Connection::open(config.db_path())?;
     db::init(&conn)?;
     info!(path = %config.db_path().display(), "database ready");
+    match transcode::reset_orphaned_running_jobs(&conn) {
+        Ok(0) => {}
+        Ok(n) => info!(n, "reset orphaned 'running' transcode jobs left over from a previous crash"),
+        Err(e) => tracing::warn!(error = %e, "failed to reset orphaned transcode jobs"),
+    }
 
     // A second, independent connection for the HTTP API rather than sharing
     // `background_loop`'s. Both point at the same on-disk (WAL-mode)
@@ -1209,6 +1214,16 @@ async fn probe_library_cmd(config: &Config) -> Result<()> {
 /// (`transcode::run_cycle`) until nothing is left pending. Shares that one
 /// code path deliberately — there is exactly one place that actually runs
 /// an encode, whether triggered by a backlog sweep or a fresh grab.
+// Deliberately does NOT call `transcode::reset_orphaned_running_jobs` on
+// startup the way `run_daemon` does — from this CLI's vantage point a
+// `running` row could belong to the actual daemon's own ticker legitimately
+// working on it right now (see the safety writeup on `claim_pending_jobs`:
+// running this backfill alongside a live daemon with transcode enabled is
+// intentionally supported, the two now share one atomic, count-aware
+// concurrency cap), and there's no reliable way to tell that apart from a
+// genuinely orphaned row from a ago-crashed run of this same command.
+// If *this* command itself is killed mid-run, its claimed jobs stay
+// `running` until the daemon is next restarted (which does its own reset).
 async fn transcode_library_cmd(config: &Config) -> Result<()> {
     if !config.transcode.enabled {
         bail!("transcode.enabled is false in config — enable it before running a backfill");

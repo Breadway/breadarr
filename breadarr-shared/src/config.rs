@@ -364,7 +364,13 @@ fn default_parallelism_min() -> usize {
 }
 
 fn default_parallelism_max() -> usize {
-    4
+    // Conservative on purpose: a real incident on a shared 15GB host
+    // running a dozen+ other containers showed concurrent 1080p/4K
+    // decode+encode sessions can push memory pressure into swap fast
+    // enough to trigger the OOM killer well before the GPU itself is the
+    // bottleneck. Raise this deliberately, per-deployment, once you've
+    // watched `free -h` under real load at the current setting.
+    2
 }
 
 fn default_reference_bitrate_kbps() -> u32 {

@@ -144,6 +144,23 @@ pub fn is_anime(conn: &Connection, media_item_id: i64) -> Result<bool> {
     Ok(result)
 }
 
+/// Resets any `running` job back to `pending` — call once at process
+/// startup (the daemon itself, and the `transcode-library` backfill), never
+/// mid-run. `running` only ever means "some still-alive process is
+/// currently encoding this" — a row left in that state at startup can only
+/// mean the process that claimed it is gone (crashed, killed, power loss),
+/// since a live process's own in-flight jobs aren't visible to it as
+/// leftover state, they're just still running. Left unreset, a crash leaves
+/// that job's slot permanently uncountable-but-also-unclaimable, quietly
+/// shrinking real capacity forever instead of just costing one retry.
+pub fn reset_orphaned_running_jobs(conn: &Connection) -> Result<usize> {
+    let reset = conn.execute(
+        "UPDATE transcode_job SET status = 'pending' WHERE status = 'running'",
+        [],
+    )?;
+    Ok(reset)
+}
+
 /// Queues one file for transcoding. `original_codec`/`original_bytes` are
 /// just recorded for the eventual report — not used for any decision.
 pub fn enqueue(
@@ -226,39 +243,71 @@ struct ClaimedJob {
 /// needs. Only claims jobs whose file already has probe data — a job
 /// enqueued moments after import but before `ensure_probed` has run yet
 /// simply isn't claimed this tick, and picks up naturally on the next one.
+///
+/// `limit` is treated as a *total* concurrency target, not "claim this many
+/// more" — it's first reduced by however many jobs are already `running`
+/// (set by anyone: this same daemon's previous still-in-flight cycle, or a
+/// separately-invoked `transcode-library` backfill process hitting the same
+/// database). Learned the hard way: without this, a long-running cycle
+/// (large files easily take longer than `poll_interval_secs`) and a
+/// concurrently-run backfill each independently claimed up to their own
+/// `parallelism_max` with no awareness of the other, stacking to 20+
+/// simultaneous GPU encodes and OOMing the host. `status='running'` is
+/// shared database state, not per-process, so counting it is what makes
+/// this a real global cap no matter how many processes are hitting this
+/// table at once — and wrapping the count+select+update in one
+/// `BEGIN IMMEDIATE` transaction (rather than three separate statements)
+/// is what stops two processes from both reading the same low count and
+/// both claiming past the limit before either one's UPDATE lands.
 async fn claim_pending_jobs(conn: &Arc<Mutex<Connection>>, limit: usize) -> Result<Vec<ClaimedJob>> {
-    let conn = conn.lock().await;
-    // Highest current bitrate first — the worst offenders (REMUX, huge
-    // season packs) free the most space per file transcoded, so they're
-    // worth reaching before smaller, already-reasonable files.
-    let mut stmt = conn.prepare(
-        "SELECT j.id, j.episode_file_id, ef.path, p.width, p.height, p.duration_secs
-         FROM transcode_job j
-         JOIN episode_file ef ON ef.id = j.episode_file_id
-         JOIN media_file_probe p ON p.episode_file_id = ef.id
-         WHERE j.status = 'pending' AND p.width IS NOT NULL AND p.height IS NOT NULL
-         ORDER BY (ef.size_bytes * 8.0 / NULLIF(p.duration_secs, 0)) DESC
-         LIMIT ?1",
-    )?;
-    let claimed = stmt
-        .query_map(params![limit as i64], |row| {
-            Ok(ClaimedJob {
-                job_id: row.get(0)?,
-                episode_file_id: row.get(1)?,
-                path: PathBuf::from(row.get::<_, String>(2)?),
-                width: row.get(3)?,
-                height: row.get(4)?,
-                duration_secs: row.get(5)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut conn = conn.lock().await;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-    for job in &claimed {
-        conn.execute(
-            "UPDATE transcode_job SET status = 'running' WHERE id = ?1",
-            params![job.job_id],
+    let running: i64 = tx.query_row(
+        "SELECT count(*) FROM transcode_job WHERE status = 'running'",
+        [],
+        |row| row.get(0),
+    )?;
+    let available = (limit as i64 - running).max(0);
+
+    let claimed = if available == 0 {
+        Vec::new()
+    } else {
+        // Highest current bitrate first — the worst offenders (REMUX, huge
+        // season packs) free the most space per file transcoded, so
+        // they're worth reaching before smaller, already-reasonable files.
+        let mut stmt = tx.prepare(
+            "SELECT j.id, j.episode_file_id, ef.path, p.width, p.height, p.duration_secs
+             FROM transcode_job j
+             JOIN episode_file ef ON ef.id = j.episode_file_id
+             JOIN media_file_probe p ON p.episode_file_id = ef.id
+             WHERE j.status = 'pending' AND p.width IS NOT NULL AND p.height IS NOT NULL
+             ORDER BY (ef.size_bytes * 8.0 / NULLIF(p.duration_secs, 0)) DESC
+             LIMIT ?1",
         )?;
-    }
+        let claimed = stmt
+            .query_map(params![available], |row| {
+                Ok(ClaimedJob {
+                    job_id: row.get(0)?,
+                    episode_file_id: row.get(1)?,
+                    path: PathBuf::from(row.get::<_, String>(2)?),
+                    width: row.get(3)?,
+                    height: row.get(4)?,
+                    duration_secs: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        for job in &claimed {
+            tx.execute(
+                "UPDATE transcode_job SET status = 'running' WHERE id = ?1",
+                params![job.job_id],
+            )?;
+        }
+        claimed
+    };
+
+    tx.commit()?;
     Ok(claimed)
 }
 
@@ -405,6 +454,93 @@ mod tests {
             exclude_hdr: true,
             exclude_min_height: 2000,
         }
+    }
+
+    fn seed_file(conn: &Connection, id: i64, size_bytes: i64) {
+        conn.execute(
+            "INSERT INTO episode_file (id, episode_id, media_item_id, path, size_bytes)
+             VALUES (?1, NULL, NULL, ?2, ?3)",
+            params![id, format!("/tmp/f{id}.mkv"), size_bytes],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO media_file_probe (episode_file_id, probed_at, probe_size_bytes, probe_mtime,
+                                            duration_secs, video_codec, width, height)
+             VALUES (?1, datetime('now'), ?2, 0, 1200.0, 'hevc', 1920, 1080)",
+            params![id, size_bytes],
+        )
+        .unwrap();
+    }
+
+    // Regression test for a real incident: a long-running cycle (large
+    // files can easily outlast `poll_interval_secs`) and a separately
+    // invoked `transcode-library` backfill each independently claimed up to
+    // their own `parallelism_max` with no shared awareness, stacking to 20+
+    // concurrent GPU encodes and OOMing the host. `claim_pending_jobs` must
+    // treat `limit` as a total cap, not "claim this many more".
+    #[tokio::test]
+    async fn claim_pending_jobs_respects_already_running_jobs_as_a_global_cap() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        for id in 1..=5 {
+            seed_file(&conn, id, 1_000_000_000);
+        }
+        // Two jobs already claimed by "someone else" (another process, or
+        // this same process's still-in-flight previous cycle).
+        conn.execute(
+            "INSERT INTO transcode_job (episode_file_id, status, queued_at) VALUES (1, 'running', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transcode_job (episode_file_id, status, queued_at) VALUES (2, 'running', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        for id in 3..=5 {
+            conn.execute(
+                "INSERT INTO transcode_job (episode_file_id, status, queued_at) VALUES (?1, 'pending', datetime('now'))",
+                params![id],
+            )
+            .unwrap();
+        }
+
+        let conn = Arc::new(Mutex::new(conn));
+        // Asking for a total of 3 concurrent, with 2 already running —
+        // should claim exactly 1 more, not 3 more.
+        let claimed = claim_pending_jobs(&conn, 3).await.unwrap();
+        assert_eq!(claimed.len(), 1);
+
+        let conn = conn.lock().await;
+        let running: i64 = conn
+            .query_row("SELECT count(*) FROM transcode_job WHERE status = 'running'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(running, 3, "total in-flight jobs must never exceed the requested cap");
+    }
+
+    #[tokio::test]
+    async fn claim_pending_jobs_claims_nothing_when_already_at_the_cap() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        for id in 1..=3 {
+            seed_file(&conn, id, 1_000_000_000);
+        }
+        for id in 1..=2 {
+            conn.execute(
+                "INSERT INTO transcode_job (episode_file_id, status, queued_at) VALUES (?1, 'running', datetime('now'))",
+                params![id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO transcode_job (episode_file_id, status, queued_at) VALUES (3, 'pending', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let conn = Arc::new(Mutex::new(conn));
+        let claimed = claim_pending_jobs(&conn, 2).await.unwrap();
+        assert!(claimed.is_empty(), "already at the cap — must not claim more");
     }
 
     #[test]
