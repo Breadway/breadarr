@@ -289,31 +289,63 @@ fn insufficient_space(dir: &Path, needed_bytes: u64) -> Result<bool> {
     Ok(available < needed_bytes)
 }
 
-/// Hardlinks into the destination (same filesystem, effectively free) and
-/// falls back to a plain copy cross-filesystem — deliberately leaves `src`
-/// untouched either way. The previous `rename`-then-delete behavior yanked
-/// the file out of qBittorrent's payload directory on every import, leaving
-/// qBittorrent holding a torrent whose data had vanished (an errored
-/// "missing files" state, seeding stopped instantly). A hardlink costs
-/// nothing extra on disk and lets qBittorrent keep seeding after import;
-/// even the copy fallback preserves seeding, just at the cost of double
-/// disk usage for that one file.
+/// `true` if `a` and `b` live on the same filesystem (compares `st_dev`),
+/// `false` if they don't *or* either can't be stat'd. Used to skip the
+/// free-space check ahead of `move_or_copy_file`: that function tries
+/// `rename` first, which needs essentially zero additional space, so
+/// checking `dest`'s free space against the *full* source file size is a
+/// false positive whenever downloads and the library share a volume (a
+/// common setup) — a real production shape found in review: a season-pack
+/// file that would `rename` instantly got rejected as "not enough free
+/// space", retried and failed identically every cycle
+/// (`MAX_IMPORT_ERRORS`), then got released back to the search pool where
+/// it was re-grabbed and failed the same way again, forever. Erring toward
+/// `false` (i.e. still running the space check) on a stat failure is the
+/// safe direction — it only means checking a space guarantee that wasn't
+/// strictly needed, never skipping one that was.
+fn same_filesystem(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev(),
+        _ => false,
+    }
+}
+
+/// Moves `src` into `dest`: a same-filesystem `rename` where possible
+/// (instant, atomic, no extra disk usage), falling back to copy-then-delete
+/// across a filesystem boundary. Nothing is left behind at `src` either way
+/// — there used to be a deliberate hardlink-and-leave-`src`-alone scheme
+/// here so qBittorrent could keep seeding the original download after
+/// import, but with nothing seeding after download completes anymore, that
+/// complexity (a same-filesystem staging relocate before every import, so
+/// the hardlink was guaranteed rather than falling back to a permanent
+/// second copy) bought nothing but risk. The file just lands directly at
+/// its final destination.
 ///
-/// The copy path writes to a `.part` sibling of `dest` and only renames it
-/// into place once the copy is complete (a same-filesystem rename, so
+/// The copy fallback writes to a `.part` sibling of `dest` and only renames
+/// it into place once the copy is complete (a same-filesystem rename, so
 /// atomic) — a crash mid-copy leaves an orphaned `.part` file rather than a
 /// truncated file at `dest`, so a retried import can't ever double-count a
-/// half-written file as already present.
-fn link_or_copy_file(src: &Path, dest: &Path) -> Result<()> {
-    if std::fs::hard_link(src, dest).is_ok() {
+/// half-written file as already present. `src` is only removed once that
+/// copy is confirmed in place, so a crash between the copy and the removal
+/// leaves both copies on disk (recoverable) rather than neither.
+fn move_or_copy_file(src: &Path, dest: &Path) -> Result<()> {
+    if std::fs::rename(src, dest).is_ok() {
         return Ok(());
     }
-    copy_via_temp_file(src, dest)
+    copy_via_temp_file(src, dest)?;
+    std::fs::remove_file(src).with_context(|| {
+        format!(
+            "copied {} to {} but failed to remove the original",
+            src.display(),
+            dest.display()
+        )
+    })
 }
 
 /// The copy fallback's actual mechanics, split out so it's directly
 /// testable without needing a real cross-filesystem boundary to force
-/// `hard_link` to fail.
+/// `rename` to fail.
 fn copy_via_temp_file(src: &Path, dest: &Path) -> Result<()> {
     let tmp = PathBuf::from(format!("{}.part", dest.display()));
     std::fs::copy(src, &tmp)
@@ -676,6 +708,156 @@ fn find_by_stem(root: &Path, stem: &std::ffi::OsStr) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// One TV episode whose file already sits on disk — matching breadarr's own
+/// `"S{season:02}E{episode:02}"` naming marker, in exactly the season
+/// directory this episode's own metadata says it should be in — despite
+/// having no `episode_file` row at all. `has_file = 0` lies about it, so
+/// the missing-content search loop treats it as genuinely absent and keeps
+/// trying to (re)download something already there.
+#[derive(Debug, PartialEq)]
+pub struct RelinkCandidate {
+    pub episode_id: i64,
+    pub media_item_id: i64,
+    pub series_title: String,
+    pub season_number: i64,
+    pub episode_number: i64,
+    pub path: PathBuf,
+}
+
+/// Every video file found at any depth under `root` — deliberately
+/// unbounded by a fixed season-folder shape, since a real production audit
+/// found layouts varying wildly per show: a plain `Season N`/`Season 0N`
+/// directly under the show root in most cases, but at least one show (a
+/// BluRay box-set release) nests an extra layer — the whole release's own
+/// folder name — between the show root and its `Season N` directories.
+/// Bounded to one show's own folder (a handful of seasons deep at most),
+/// same scope as `find_by_basename`/`find_by_stem`.
+fn collect_video_files(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(collect_video_files(&path));
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| VIDEO_EXTS.contains(&e.to_lowercase().as_str()))
+        {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// Finds every `has_file = 0` TV episode whose show folder contains exactly
+/// one video file matching its own `"S{season:02}E{episode:02}"` naming
+/// marker (breadarr's own convention, which the vast majority of
+/// scene/fansub releases also happen to embed verbatim even under otherwise
+/// raw filenames) — found via a real production audit: several shows had
+/// `episode`/`media_item` rows (almost certainly rebuilt by an earlier
+/// DB-recovery incident) with no matching `episode_file` row, even though
+/// the actual video files were never touched and still sat right where they
+/// always had, often under a pre-breadarr folder layout (unpadded `Season
+/// N`, or an extra nested release-folder level) that a check scoped only to
+/// `season_dir`'s exact zero-padded shape would never find. Walks the whole
+/// show folder once and reuses that listing for every missing episode in
+/// it, rather than re-walking per episode. Purely a finder — see
+/// `relink_episode_files` for the (additive-only) part that actually links
+/// anything in.
+///
+/// Deliberately conservative in both directions: a show folder with *zero*
+/// marker matches for an episode is left alone (genuinely missing, nothing
+/// to relink here — `reconcile_missing_files`/the normal search loop are the
+/// right tools for an actually-absent file), and *more than one* match is
+/// left alone too rather than guessed at, returned separately so a human
+/// can look instead of silently picking one. A show using pure absolute
+/// numbering with no season/episode marker at all in its filenames (a real
+/// pattern found on some anime releases) simply never matches either way —
+/// the safe failure mode, not a wrong guess.
+pub fn find_relinkable_episode_files(
+    conn: &Connection,
+) -> Result<(Vec<RelinkCandidate>, Vec<String>)> {
+    let mut show_stmt = conn.prepare(
+        "SELECT DISTINCT m.id, m.title, m.root_folder
+         FROM episode e
+         JOIN media_item m ON m.id = e.media_item_id
+         WHERE e.has_file = 0 AND m.kind = 'series'",
+    )?;
+    let shows: Vec<(i64, String, String)> = show_stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let mut candidates = Vec::new();
+    let mut ambiguous = Vec::new();
+
+    let mut ep_stmt = conn.prepare(
+        "SELECT id, season_number, episode_number FROM episode
+         WHERE media_item_id = ?1 AND has_file = 0",
+    )?;
+    for (media_item_id, series_title, root_folder) in shows {
+        let all_video_files = collect_video_files(Path::new(&root_folder));
+        let episodes: Vec<(i64, i64, i64)> = ep_stmt
+            .query_map(params![media_item_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        for (episode_id, season_number, episode_number) in episodes {
+            let marker = format!("S{season_number:02}E{episode_number:02}");
+            let matches: Vec<&PathBuf> = all_video_files
+                .iter()
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.contains(&marker))
+                })
+                .collect();
+            match matches.len() {
+                0 => {}
+                1 => candidates.push(RelinkCandidate {
+                    episode_id,
+                    media_item_id,
+                    series_title: series_title.clone(),
+                    season_number,
+                    episode_number,
+                    path: matches[0].clone(),
+                }),
+                n => ambiguous.push(format!(
+                    "{series_title} S{season_number:02}E{episode_number:02}: {n} candidate files under {root_folder}"
+                )),
+            }
+        }
+    }
+    Ok((candidates, ambiguous))
+}
+
+/// Links each `RelinkCandidate` into `episode_file` (probing it first, same
+/// as a real import) and marks its episode `has_file = 1`. Purely additive
+/// — never moves, renames, or deletes anything on disk, since the file was
+/// already exactly where a real import would have put it; this only makes
+/// breadarr's own bookkeeping admit what's already true.
+pub fn relink_episode_files(conn: &Connection, candidates: &[RelinkCandidate]) -> Result<usize> {
+    let mut linked = 0;
+    for c in candidates {
+        let size_bytes = std::fs::metadata(&c.path)?.len() as i64;
+        conn.execute(
+            "INSERT INTO episode_file (episode_id, media_item_id, path, size_bytes, subtitle_status) VALUES (?1, ?2, ?3, ?4, 'none')",
+            params![c.episode_id, c.media_item_id, c.path.to_string_lossy(), size_bytes],
+        )?;
+        let episode_file_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE episode SET has_file = 1 WHERE id = ?1",
+            params![c.episode_id],
+        )?;
+        ensure_probed(conn, episode_file_id, &c.path)?;
+        linked += 1;
+    }
+    Ok(linked)
 }
 
 /// Runs ffprobe on `path` and upserts the result into `media_file_probe`
@@ -1098,12 +1280,22 @@ fn remux_one_backlog_file(conn: &Connection, episode_file_id: i64, path: &Path) 
     }
 
     let tmp = path.with_extension("fixed.mkv");
-    mkv::remux_english_default(path, &tmp, &tracks)?;
+    if let Err(e) = mkv::remux_english_default(path, &tmp, &tracks) {
+        // Leaked otherwise: a stray `.fixed.mkv` sitting in the library
+        // directory forever, matched by `find_relinkable_episode_files` on
+        // the same `SxxExx` substring as the real file and reported as an
+        // ambiguous, unrelinkable episode.
+        std::fs::remove_file(&tmp).ok();
+        return Err(e);
+    }
 
     // Same atomic-swap shape as `copy_via_temp_file`: rename the freshly
     // remuxed output over the original on the same filesystem, so a crash
     // mid-swap can never leave a half-written file at the real path.
-    std::fs::rename(&tmp, path)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        std::fs::remove_file(&tmp).ok();
+        return Err(e.into());
+    }
 
     let size_bytes = std::fs::metadata(path)?.len();
     conn.execute(
@@ -1138,193 +1330,6 @@ fn remap_path(reported: &str, container_prefix: &str, host_prefix: &str) -> Path
     }
 }
 
-/// Marker directory name for the seeding-preserving staging area — checked
-/// as a plain substring of a torrent's reported `content_path` to tell
-/// whether it's already been relocated there in a previous cycle.
-const STAGING_DIR_NAME: &str = ".breadarr-staging";
-
-/// How many times to poll qBittorrent for a `setLocation` move to finish
-/// before giving up for this cycle (it'll simply be retried next cycle —
-/// see `relocate_completed_to_staging`).
-const RELOCATE_POLL_ATTEMPTS: u32 = 5;
-const RELOCATE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Finds the nearest ancestor of `path` that actually exists — `path`
-/// itself (e.g. a show's season folder) may not have been created yet.
-fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf> {
-    let mut current = path;
-    loop {
-        if current.exists() {
-            return Ok(current.to_path_buf());
-        }
-        current = current
-            .parent()
-            .with_context(|| format!("no existing ancestor found for {}", path.display()))?;
-    }
-}
-
-/// Finds the filesystem mount-point directory containing `path`, by
-/// walking up parents until the device id changes. Used to place the
-/// seeding-staging directory on the same physical filesystem as the final
-/// destination — the whole point of staging is that the later hardlink-out
-/// in `import_one` is guaranteed to succeed as a true hardlink rather than
-/// silently falling back to a full copy, and a hardlink can never cross a
-/// filesystem boundary.
-fn find_mount_root(path: &Path) -> Result<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
-    let start = nearest_existing_ancestor(path)?;
-    let dev = std::fs::metadata(&start)?.dev();
-    let mut current = start;
-    loop {
-        let Some(parent) = current.parent() else {
-            return Ok(current);
-        };
-        let Ok(parent_meta) = std::fs::metadata(parent) else {
-            return Ok(current);
-        };
-        if parent_meta.dev() != dev {
-            return Ok(current);
-        }
-        current = parent.to_path_buf();
-    }
-}
-
-/// The staging directory a given torrent's data should be relocated to —
-/// on the same filesystem as `dest_dir`, named by torrent hash so multiple
-/// torrents' leftover extras (samples/nfo/screenshots) never collide.
-fn staging_dir_for(dest_dir: &Path, torrent_hash: &str) -> Result<PathBuf> {
-    let mount_root = find_mount_root(dest_dir)?;
-    Ok(mount_root.join(STAGING_DIR_NAME).join(torrent_hash))
-}
-
-/// For every pending grab whose torrent has finished downloading but whose
-/// data isn't already staged, relocates it via qBittorrent's own
-/// `setLocation` to a directory on the same filesystem as its eventual
-/// destination, then waits (briefly, bounded) for the move to actually
-/// finish — `setLocation` returns before the physical move completes.
-///
-/// Best-effort and self-healing by design: a grab that isn't staged yet
-/// this cycle is simply retried on the next one (nothing here ever fails
-/// the whole import cycle), so a slow move or a transient qBit API error
-/// never blocks or loses anything — it just costs one extra cycle.
-///
-/// Returns whether anything was actually relocated, so the caller knows
-/// whether it's worth re-fetching the torrent list before importing (a
-/// relocated torrent's `content_path` only reflects its new home after a
-/// fresh `list_torrents` call).
-async fn relocate_completed_to_staging(
-    qbit: &QbitClient,
-    pending: &[PendingGrab],
-    torrents: &[crate::qbit::TorrentInfo],
-    category: &str,
-) -> bool {
-    let mut relocated_any = false;
-    for grab in pending {
-        let Some(torrent) = torrents.iter().find(|t| t.hash == grab.torrent_hash()) else {
-            continue;
-        };
-        if torrent.progress < 1.0 {
-            continue;
-        }
-        if torrent.content_path.contains(STAGING_DIR_NAME) {
-            continue; // already staged in a previous cycle
-        }
-
-        let staging = match staging_dir_for(Path::new(grab.root_folder()), grab.torrent_hash()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    hash = grab.torrent_hash(),
-                    "could not determine a staging directory this cycle"
-                );
-                continue;
-            }
-        };
-
-        if let Err(e) = qbit
-            .set_location(grab.torrent_hash(), &staging.to_string_lossy())
-            .await
-        {
-            tracing::warn!(
-                error = %e,
-                hash = grab.torrent_hash(),
-                "qbit relocate-to-staging failed, will retry next cycle"
-            );
-            continue;
-        }
-
-        if wait_for_relocation(qbit, grab.torrent_hash(), category, &staging).await {
-            relocated_any = true;
-        } else {
-            tracing::warn!(
-                hash = grab.torrent_hash(),
-                "qbit relocate-to-staging didn't finish in time, will retry next cycle"
-            );
-        }
-    }
-    relocated_any
-}
-
-/// Waits for qBittorrent to report the torrent's `content_path` as staged,
-/// then verifies the reported path actually landed where expected —
-/// qBittorrent (when it's running in its own Docker container) reports *its
-/// own* filesystem view, and `staging_dir_for`/`set_location` currently
-/// rely on every library mount being set up as an identity mount (container
-/// path == host path) for that reported path to be directly meaningful
-/// from the host's side. That's a deployment convention, not something the
-/// code enforces, so it can be wrong for a given install's mount layout. If
-/// it is, treating the reported path as trustworthy without checking could
-/// let `import_one`'s later hardlink-out silently fall back to a full
-/// cross-device copy (or fail outright) instead of the guaranteed-cheap
-/// hardlink staging exists to provide — so this confirms the reported path
-/// resolves, from the host, to the *same physical filesystem* as
-/// `expected_staging` before trusting it.
-async fn wait_for_relocation(
-    qbit: &QbitClient,
-    hash: &str,
-    category: &str,
-    expected_staging: &Path,
-) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    for _ in 0..RELOCATE_POLL_ATTEMPTS {
-        tokio::time::sleep(RELOCATE_POLL_INTERVAL).await;
-        let Ok(torrents) = qbit.list_torrents(Some(category)).await else {
-            continue;
-        };
-        let Some(t) = torrents.iter().find(|t| t.hash == hash) else {
-            continue;
-        };
-        if !t.content_path.contains(STAGING_DIR_NAME) {
-            continue;
-        }
-        let reported = Path::new(&t.content_path);
-        match (
-            std::fs::metadata(reported),
-            std::fs::metadata(expected_staging),
-        ) {
-            (Ok(reported_meta), Ok(expected_meta))
-                if reported_meta.dev() == expected_meta.dev() =>
-            {
-                return true;
-            }
-            _ => {
-                tracing::error!(
-                    hash,
-                    reported = %t.content_path,
-                    expected = %expected_staging.display(),
-                    "qbit reports the torrent as staged, but its content_path isn't visible \
-                     on the same host filesystem as expected — the container's mount for this \
-                     library path may not be an identity mount; refusing to trust this relocation"
-                );
-                return false;
-            }
-        }
-    }
-    false
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn run_import_cycle(
     conn: &Connection,
@@ -1342,20 +1347,7 @@ pub async fn run_import_cycle(
 
     let torrents = qbit.list_torrents(Some(category)).await?;
 
-    // Relocate completed-but-not-yet-staged torrents onto the same
-    // filesystem as their destination *before* importing, so the
-    // hardlink-out below (`link_or_copy_file`, unchanged) is a true
-    // hardlink instead of a full cross-drive copy — qBittorrent keeps
-    // seeding indefinitely from the staged location afterward, with no
-    // permanent second copy of the data anywhere.
-    let relocated_any = relocate_completed_to_staging(qbit, &pending, &torrents, category).await;
-    let torrents = if relocated_any {
-        qbit.list_torrents(Some(category)).await?
-    } else {
-        torrents
-    };
-
-    let stats = process_pending_grabs(
+    let (stats, imported_hashes) = process_pending_grabs(
         conn,
         &pending,
         &torrents,
@@ -1364,9 +1356,31 @@ pub async fn run_import_cycle(
         transcode_cfg,
     )?;
 
+    // The file(s) are already gone from qBittorrent's download directory by
+    // this point — moved into the library, or deleted outright because a
+    // better file already existed — no seeding to preserve either way, so
+    // the torrent itself is just forgotten rather than left sitting around
+    // in a "files missing" error state. Best-effort: a failed delete here
+    // never undoes or blocks the import that already succeeded.
+    for hash in &imported_hashes {
+        if let Err(e) = qbit.delete_torrent(hash).await {
+            tracing::warn!(hash, error = %e, "failed to remove completed torrent from qbittorrent");
+        }
+    }
+
+    // Best-effort, same reasoning as the `delete_torrent` cleanup just
+    // above: by this point files have already been moved, DB rows written,
+    // and torrents removed from qBittorrent — a real import that already
+    // succeeded. Propagating a Jellyfin 500/timeout here used to discard
+    // `stats` entirely and report the whole cycle as failed, which also
+    // skipped `stats.failed`/`stats.quality_flagged` notifications for
+    // imports that had nothing to do with Jellyfin. The library picks up
+    // the new files on its own next scheduled scan either way.
     if stats.imported > 0 {
         if let Some(jellyfin) = jellyfin {
-            jellyfin.refresh_library().await?;
+            if let Err(e) = jellyfin.refresh_library().await {
+                tracing::warn!(error = %e, "failed to trigger jellyfin library refresh");
+            }
         }
     }
 
@@ -1388,8 +1402,16 @@ fn process_pending_grabs(
     container_downloads_path: &str,
     host_downloads_path: &str,
     transcode_cfg: Option<&breadarr_shared::config::TranscodeConfig>,
-) -> Result<ImportStats> {
+) -> Result<(ImportStats, Vec<String>)> {
     let mut stats = ImportStats::default();
+    // Torrent hashes whose data has been fully dealt with this cycle — moved
+    // into the library, or deleted outright because a better file already
+    // existed (see `ImportOutcome::SkippedAlreadyHaveBetter`, whose only
+    // producer, `import_one`, deletes the losing download itself). Either
+    // way nothing remains at the torrent's original location, so the caller
+    // (`run_import_cycle`, the async I/O boundary this function is
+    // deliberately kept free of) removes each from qBittorrent afterward.
+    let mut imported_hashes = Vec::new();
 
     for grab in pending {
         let Some(torrent) = torrents.iter().find(|t| t.hash == grab.torrent_hash()) else {
@@ -1413,11 +1435,11 @@ fn process_pending_grabs(
             continue;
         }
         if torrent.state == "moving" {
-            // qBittorrent's own `setLocation` relocation (or a manual move)
-            // is still physically in flight — `content_path` may already
-            // point at the new location while the actual bytes are still
-            // being copied there. Importing now risks hardlinking/copying
-            // a partially-moved (truncated) file into the library and
+            // A category/save-path change (e.g. a manual move in the
+            // qBittorrent UI) is still physically in flight — `content_path`
+            // may already point at the new location while the actual bytes
+            // are still being copied there. Importing now risks moving a
+            // partially-relocated (truncated) file into the library and
             // marking it complete. Simply wait; this is checked every
             // cycle, so it proceeds as soon as the move finishes.
             stats.skipped_incomplete += 1;
@@ -1452,6 +1474,9 @@ fn process_pending_grabs(
                 Ok(outcome) => {
                     stats.imported += outcome.episodes_imported;
                     stats.quality_flagged += outcome.quality_flagged;
+                    if outcome.episodes_imported > 0 {
+                        imported_hashes.push(grab.torrent_hash().to_string());
+                    }
                 }
                 Err(e) => {
                     let error_count = record_import_error(conn, *release_id)?;
@@ -1488,8 +1513,14 @@ fn process_pending_grabs(
                 if quality_flagged {
                     stats.quality_flagged += 1;
                 }
+                imported_hashes.push(grab.torrent_hash().to_string());
             }
-            Ok(ImportOutcome::SkippedAlreadyHaveBetter) => {}
+            Ok(ImportOutcome::SkippedAlreadyHaveBetter) => {
+                // The download's data is already handled — `import_one`
+                // deleted the losing file itself — so there's nothing left
+                // for qBittorrent to track either.
+                imported_hashes.push(grab.torrent_hash().to_string());
+            }
             Err(e) => {
                 let error_count = record_import_error(conn, grab.release_id())?;
                 if error_count >= MAX_IMPORT_ERRORS {
@@ -1512,7 +1543,7 @@ fn process_pending_grabs(
         }
     }
 
-    Ok(stats)
+    Ok((stats, imported_hashes))
 }
 
 /// What actually happened when `import_one` was asked to import a
@@ -1529,11 +1560,12 @@ enum ImportOutcome {
 
 /// Shared by every place a freshly-imported file becomes eligible for the
 /// async transcode queue (`import_one`, season-pack import) — reads the
-/// probe data `ensure_probed` just wrote, delegates the actual eligibility
-/// call to `transcode::should_enqueue` (the one place anime/HDR/height/
-/// already-AV1 rules live), and enqueues only if all of that says yes.
-/// Never propagates a failure into the caller's import result — same
-/// "never fail an otherwise-successful import" treatment as probing.
+/// probe data `ensure_probed` just wrote, delegates the codec/HDR/height
+/// eligibility call to `transcode::should_enqueue`, and — if eligible —
+/// decides the encode pipeline (`transcode::is_anime_content`, path-prefix
+/// first then metadata fallback) before enqueueing. Never propagates a
+/// failure into the caller's import result — same "never fail an
+/// otherwise-successful import" treatment as probing.
 fn maybe_enqueue_transcode(
     conn: &Connection,
     media_item_id: i64,
@@ -1553,10 +1585,40 @@ fn maybe_enqueue_transcode(
         return Ok(());
     };
 
-    if crate::transcode::should_enqueue(conn, media_item_id, video_codec.as_deref(), hdr != 0, height, cfg)? {
-        crate::transcode::enqueue(conn, episode_file_id, video_codec.as_deref(), size_bytes)?;
+    if !crate::transcode::should_enqueue(video_codec.as_deref(), hdr != 0, height, cfg) {
+        return Ok(());
     }
+
+    let path: String = conn.query_row(
+        "SELECT path FROM episode_file WHERE id = ?1",
+        params![episode_file_id],
+        |row| row.get(0),
+    )?;
+    let is_anime = crate::transcode::is_anime_content(conn, media_item_id, Path::new(&path), cfg)?;
+    crate::transcode::enqueue(conn, episode_file_id, video_codec.as_deref(), size_bytes, is_anime, false)?;
     Ok(())
+}
+
+/// A tracked file renamed aside to make room for an incoming upgrade —
+/// `parked_at` may be empty (never actually renamed anything) when the
+/// tracked `episode_file` row's file was already missing from disk; `row_id`
+/// is `None` when this represents a stray untracked file at `dest` rather
+/// than an actual tracked row to drop.
+struct StaleFile {
+    parked_at: PathBuf,
+    restore_to: PathBuf,
+    row_id: Option<i64>,
+}
+
+impl StaleFile {
+    /// Best-effort: puts the parked file back where it came from after a
+    /// later step (free-space check, the actual move) fails, so a failed
+    /// import never leaves neither the old file nor the new one behind.
+    fn restore(&self) {
+        if self.parked_at.as_os_str().len() > 0 {
+            std::fs::rename(&self.parked_at, &self.restore_to).ok();
+        }
+    }
 }
 
 fn import_one(
@@ -1581,19 +1643,22 @@ fn import_one(
             !mkv::default_track_is_english_or_unset(&tracks) && mkv::has_english_track(&tracks);
         if needs_fix {
             let tmp = source_path.with_extension("fixed.mkv");
-            mkv::remux_english_default(&source_path, &tmp, &tracks)?;
-            // `source_path` is qBittorrent's actual seeding payload for
-            // this torrent — deleting it here, before the free-space check
-            // and the import below have even run, defeats the whole
-            // staging design (whose point is to keep seeding intact) and
-            // risks real data loss if either subsequent step fails: the
-            // original would already be gone, `working_path` might not
-            // have made it into the library either, and qBittorrent can't
-            // necessarily re-fetch a dead swarm. `link_or_copy_file`
-            // already leaves its source untouched for exactly this reason
-            // in the non-remux path (see its own doc comment) — the remux
-            // scratch output below gets the same treatment: only removed
-            // once it's been successfully imported.
+            if let Err(e) = mkv::remux_english_default(&source_path, &tmp, &tracks) {
+                // A failed remux can still leave a partially written `tmp`
+                // behind; left uncleaned it sits in the library/download
+                // directory as a stray `.fixed.mkv`, which
+                // `find_relinkable_episode_files` can then match on the same
+                // `SxxExx` substring as the real file and report the episode
+                // as ambiguous.
+                std::fs::remove_file(&tmp).ok();
+                return Err(e);
+            }
+            // Deliberately not deleting `source_path` here, before the
+            // free-space check and the import below have even run: doing so
+            // risks real data loss if either subsequent step fails, leaving
+            // neither the original nor a successfully-placed replacement
+            // anywhere. `source_path` is only ever removed once the remuxed
+            // derivative has actually landed in the library (see below).
             working_path = tmp;
             remuxed = true;
         }
@@ -1641,41 +1706,65 @@ fn import_one(
     std::fs::create_dir_all(&dest_dir)?;
     let dest = dest_dir.join(&filename);
 
-    // Set below (to the renamed-aside stale file's path) only when this
-    // import is an upgrade over an existing, worse-scoring file — see the
-    // `dest.exists()` branch. Used to restore the original on any failure
-    // between here and the replacement being confirmed on disk, and to
-    // gate the deferred cleanup (old row + old file) once it succeeds.
-    let mut old_sibling: Option<PathBuf> = None;
+    // Looked up by *identity* (episode_id for TV, media_item_id with a NULL
+    // episode_id for movies) rather than by whether a file happens to sit at
+    // `dest` right now. A real production bug found the hard way: a movie's
+    // `root_folder` had drifted (recategorized between library folders)
+    // after it was already imported, so its tracked `episode_file.path`
+    // no longer matched the *current* `dest` — `dest.exists()` came back
+    // false, the whole comparison below was skipped entirely, and a fresh
+    // grab imported right in alongside the untouched original, a real
+    // duplicate neither this function nor the score comparison ever knew
+    // to look for. Keying off identity means the comparison still happens
+    // even when the tracked file's path and the freshly computed `dest`
+    // disagree.
+    // Collects *every* matching row, not just one: nothing in the schema
+    // enforces a single `episode_file` per episode (the `library_health`
+    // duplicate-groups report exists precisely because duplicates occur
+    // here), and `query_row` would silently pick an arbitrary one of them,
+    // leaving any other duplicate's row and file untouched — orphaned
+    // pointing at a file this import may have just deleted (via the
+    // `old_sibling`/`dest` overwrite below), or, worse, read as the *only*
+    // existing file for the `upgrade_locked` check so a transcoded file's
+    // lock could be missed if it happened to live in the row `query_row`
+    // didn't return.
+    let existing_files: Vec<(i64, String, i64)> = conn
+        .prepare(
+            "SELECT id, path, upgrade_locked FROM episode_file
+             WHERE (episode_id = ?1 AND ?1 IS NOT NULL) OR (media_item_id = ?2 AND ?1 IS NULL)",
+        )?
+        .query_map(params![episode_id, grab.media_item_id()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    // The deterministic filename means a second release for the same
-    // episode/movie collides on this exact path. `link_or_copy_file`'s copy
-    // fallback renames into place, which *silently overwrites* an existing
-    // file with no comparison at all — a lower-scored duplicate arriving
-    // second (e.g. a 480p release importing after an already-imported
-    // 1080p one, entirely possible before resolution was scored, and still
-    // possible from a race between two grabs of the same episode) would
-    // quietly replace the better file already in the library. Checked here
-    // rather than left to the filesystem to decide by import order.
-    if dest.exists() {
+    // Trigger the comparison whenever *either* signal says something might
+    // already be here: a tracked row (regardless of where its file actually
+    // is), or a physical file already sitting at `dest` (a stray,
+    // not-yet-reconciled leftover with no tracked row at all — the case the
+    // original `dest.exists()`-only check covered). Comparing on either
+    // condition alone would miss the other's failure mode; comparing on
+    // both is a strict superset of what the original single check did.
+    let mut old_siblings: Vec<StaleFile> = Vec::new();
+    if !existing_files.is_empty() || dest.exists() {
         // Belt-and-suspenders: the missing-content/upgrade search paths
         // already refuse to re-grab an `upgrade_locked` file (it isn't
         // "missing" and the upgrade loop skips it), so this shouldn't be
         // reachable for one today — but a locally AV1-transcoded file
         // should never be silently overwritten on score alone regardless
         // of which path produced the incoming grab, same guard as
-        // `import_season_pack_file`'s matching check.
-        let upgrade_locked: i64 = conn
-            .query_row(
-                "SELECT upgrade_locked FROM episode_file WHERE path = ?1",
-                params![dest.to_string_lossy()],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if upgrade_locked != 0 {
+        // `import_season_pack_file`'s matching check. Locked if *any*
+        // duplicate row is locked, not just whichever one a plain
+        // `query_row` would have happened to return.
+        let upgrade_locked = existing_files.iter().any(|(_, _, ul)| *ul != 0);
+        if upgrade_locked {
             if remuxed {
                 std::fs::remove_file(&working_path).ok();
             }
+            // Nothing seeds this download anymore and it isn't going
+            // anywhere — the episode already has a file in place, so
+            // there's no reason to leave a duplicate orphaned on disk.
+            std::fs::remove_file(&source_path).ok();
             return Ok(ImportOutcome::SkippedAlreadyHaveBetter);
         }
         let current_score: f32 = conn
@@ -1715,29 +1804,73 @@ fn import_one(
             if remuxed {
                 std::fs::remove_file(&working_path).ok();
             }
+            // Same reasoning as the upgrade_locked case above — this
+            // download lost the comparison and nothing seeds it, so it's
+            // just wasted disk space if left in place.
+            std::fs::remove_file(&source_path).ok();
             return Ok(ImportOutcome::SkippedAlreadyHaveBetter);
         }
         // The new file scores strictly better than what's currently there.
-        // Move the stale file sideways to a `.old` sibling — rather than
-        // deleting it and its tracking row outright — so the replacement is
-        // placed and confirmed *before* the original is actually given up.
-        // A `rename` (not a delete) still frees up `dest` for the primary
-        // hardlink path (`std::fs::hard_link` fails outright if the
-        // destination already exists), so an upgrade is still a cheap
-        // hardlink swap in the common case; it just also means that if the
-        // free-space check or `link_or_copy_file` below fails (I/O error,
-        // dest dir vanished, disk full), the original file gets moved back
-        // into place instead of being gone for good. The DB row is left
-        // alone until the replacement is confirmed on disk, for the same
-        // reason.
-        old_sibling = Some(PathBuf::from(format!("{}.old", dest.display())));
-        std::fs::rename(&dest, old_sibling.as_ref().unwrap())?;
+        // Park aside whatever's actually here — the tracked row's real file
+        // (not necessarily `dest` — see above) and/or a stray file sitting
+        // at `dest` with no tracked row — rather than deleting anything
+        // outright, so the replacement is placed and confirmed *before*
+        // the original is actually given up. If the free-space check or
+        // `move_or_copy_file` below then fails (I/O error, dest dir
+        // vanished, disk full), everything parked gets moved back into
+        // place instead of being gone for good. The DB row is left alone
+        // until the replacement is confirmed on disk, for the same reason.
+        // Park *every* matching row, not just one — a second (duplicate)
+        // row left untouched here would otherwise keep pointing at a file
+        // that may be gone once the replacement lands (the incoming file
+        // gets moved to `dest`, and any duplicate's file sitting elsewhere
+        // is simply orphaned in the DB with no cleanup).
+        for (existing_id, existing_path, _) in &existing_files {
+            let existing_path = PathBuf::from(existing_path);
+            if existing_path.exists() {
+                let parked_at = PathBuf::from(format!("{}.old", existing_path.display()));
+                std::fs::rename(&existing_path, &parked_at)?;
+                old_siblings.push(StaleFile {
+                    parked_at,
+                    restore_to: existing_path,
+                    row_id: Some(*existing_id),
+                });
+            } else {
+                // The tracked row survived but its file didn't (e.g.
+                // deleted out from under breadarr) — nothing to park, but
+                // the stale row still needs dropping once the new file is
+                // confirmed in place.
+                old_siblings.push(StaleFile {
+                    parked_at: PathBuf::new(),
+                    restore_to: PathBuf::new(),
+                    row_id: Some(*existing_id),
+                });
+            }
+        }
+        if dest.exists() && old_siblings.iter().all(|s| s.restore_to != dest) {
+            let parked_at = PathBuf::from(format!("{}.old", dest.display()));
+            std::fs::rename(&dest, &parked_at)?;
+            // Doesn't duplicate an existing park (from the tracked-row loop
+            // above) — only added when none of those already cover `dest`.
+            old_siblings.push(StaleFile {
+                parked_at,
+                restore_to: dest.clone(),
+                row_id: None,
+            });
+        }
     }
 
     let needed_bytes = std::fs::metadata(&working_path)?.len();
-    if insufficient_space(&dest_dir, needed_bytes)? {
-        if let Some(old_sibling) = &old_sibling {
-            std::fs::rename(old_sibling, &dest).ok();
+    if !same_filesystem(&working_path, &dest_dir) && insufficient_space(&dest_dir, needed_bytes)? {
+        for stale in &old_siblings {
+            stale.restore();
+        }
+        // `working_path` is the remux scratch copy (`source_path` is the
+        // real, still-intact download) — disposable, and left uncleaned it
+        // leaks into whichever directory it was written in (see the same
+        // cleanup added above for a failed remux).
+        if remuxed {
+            std::fs::remove_file(&working_path).ok();
         }
         anyhow::bail!(
             "not enough free space at {} for {needed_bytes} bytes (source: {})",
@@ -1746,31 +1879,39 @@ fn import_one(
         );
     }
 
-    if let Err(err) = link_or_copy_file(&working_path, &dest) {
+    if let Err(err) = move_or_copy_file(&working_path, &dest) {
         // Restore the original file rather than leaving the user with
         // neither the old file nor the new one — this is the exact failure
         // mode a `DELETE`-then-place ordering used to leave unrecoverable.
-        if let Some(old_sibling) = &old_sibling {
-            std::fs::rename(old_sibling, &dest).ok();
+        for stale in &old_siblings {
+            stale.restore();
+        }
+        if remuxed {
+            std::fs::remove_file(&working_path).ok();
         }
         return Err(err);
     }
     if remuxed {
-        // `working_path` here is the scratch remux output, not qBittorrent's
-        // original content file (which was already removed above, in the
-        // remux branch, to make way for it) — nothing else reads it, so
-        // unlike the plain-import case there's no seeding reason to keep it.
-        std::fs::remove_file(&working_path).ok();
+        // `working_path` (the remux scratch output) was already consumed by
+        // the move above either way — nothing left to clean up there. What's
+        // left is `source_path`: qBittorrent's original pre-remux download,
+        // a genuinely separate file from `working_path`. Nothing seeds it
+        // anymore and its remuxed derivative is now safely in the library,
+        // so it's just wasted disk space if left behind.
+        std::fs::remove_file(&source_path).ok();
     }
 
     // The replacement is confirmed in place on disk — only now is it safe
-    // to drop the old tracking row and the renamed-aside original.
-    if let Some(old_sibling) = old_sibling {
-        conn.execute(
-            "DELETE FROM episode_file WHERE path = ?1",
-            params![dest.to_string_lossy()],
-        )?;
-        std::fs::remove_file(&old_sibling).ok();
+    // to drop the old tracking row(s) (by id, not by path — a tracked row's
+    // path may never have matched `dest` in the first place) and the
+    // renamed-aside original(s).
+    for stale in old_siblings {
+        if let Some(row_id) = stale.row_id {
+            conn.execute("DELETE FROM episode_file WHERE id = ?1", params![row_id])?;
+        }
+        if stale.parked_at.as_os_str().len() > 0 {
+            std::fs::remove_file(&stale.parked_at).ok();
+        }
     }
 
     let size_bytes = std::fs::metadata(&dest)?.len();
@@ -2020,7 +2161,7 @@ enum PackFileOutcome {
 }
 
 /// One file's worth of the season-pack import: the same dest-collision
-/// scoring, free-space check, hardlink-or-copy, `episode_file` bookkeeping,
+/// scoring, free-space check, move-or-copy, `episode_file` bookkeeping,
 /// and post-import probe that `import_one` does for a single-episode grab,
 /// scoped to one already-identified `episode_id` within a larger pack.
 #[allow(clippy::too_many_arguments)]
@@ -2058,27 +2199,46 @@ fn import_season_pack_file(
     std::fs::create_dir_all(&dest_dir)?;
     let dest = dest_dir.join(&filename);
 
-    // Same reasoning as import_one's own dest-collision check: a second
-    // release for the same episode (here, from a *different* pack or a
-    // single-episode grab) must not silently overwrite a better file
-    // already in place.
-    let mut old_sibling: Option<PathBuf> = None;
-    if dest.exists() {
+    // Looked up by identity (this episode's id), same reasoning as
+    // import_one's matching fix: a season pack's incoming file must be
+    // compared against whatever this episode is *actually* tracked as
+    // having, not against whatever happens to physically sit at `dest`
+    // right now — those can disagree if `root_folder` ever drifted after
+    // the tracked file was imported.
+    // Every matching row, not just one — same duplicate-row fix as
+    // `import_one` (see its comment): nothing enforces a single
+    // `episode_file` per episode, and `query_row` would silently pick an
+    // arbitrary one, leaving any duplicate's row/file untouched and
+    // potentially missing its `upgrade_locked` flag.
+    let mut old_siblings: Vec<StaleFile> = Vec::new();
+    let existing_files: Vec<(i64, String, i64)> = conn
+        .prepare("SELECT id, path, upgrade_locked FROM episode_file WHERE episode_id = ?1")?
+        .query_map(params![episode_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Trigger on either signal, same generalization as import_one's matching
+    // fix: a tracked row (wherever its file really is) or a stray physical
+    // file at `dest` with no tracked row at all.
+    if !existing_files.is_empty() || dest.exists() {
         // A locally AV1-transcoded file is a deliberate shrink, not
         // something a season pack (scored against its own, much larger,
         // original release) should be allowed to silently overwrite just
         // because its release score happens to be higher — that score was
         // never computed against a transcoded file's actual size/quality
         // tradeoff. Checked before the score comparison, same reasoning as
-        // `movie_eligible_for_upgrade`/`enumerate_upgrade_targets`.
-        let upgrade_locked: i64 = conn
-            .query_row(
-                "SELECT upgrade_locked FROM episode_file WHERE path = ?1",
-                params![dest.to_string_lossy()],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if upgrade_locked != 0 {
+        // `movie_eligible_for_upgrade`/`enumerate_upgrade_targets`. Locked
+        // if *any* duplicate row is locked.
+        let upgrade_locked = existing_files.iter().any(|(_, _, ul)| *ul != 0);
+        if upgrade_locked {
+            // Nothing seeds this download anymore and it isn't going
+            // anywhere — this one file within the pack loses to what's
+            // already in place, so there's no reason to leave it orphaned
+            // on disk (other files in the same pack are handled by their
+            // own separate calls to this function, so only this one file
+            // is removed here, not the whole pack directory).
+            std::fs::remove_file(source_path).ok();
             return Ok(PackFileOutcome::SkippedAlreadyHaveBetter);
         }
         let existing_best: Option<f32> = conn.query_row(
@@ -2087,23 +2247,49 @@ fn import_season_pack_file(
             |row| row.get(0),
         )?;
         if existing_best.is_some_and(|best| best >= release_score) {
+            std::fs::remove_file(source_path).ok();
             return Ok(PackFileOutcome::SkippedAlreadyHaveBetter);
         }
-        // This episode's file is being upgraded. Move the stale file aside
-        // to a `.old` sibling rather than deleting it (and its row) outright
-        // — `dest` is still free for the hardlink fast path, but the
-        // original survives on disk until the replacement is confirmed in
-        // place, so a failed free-space check or `link_or_copy_file` below
-        // can't lose the file. See import_one's matching comment for the
-        // fuller reasoning; this is the same fix applied there.
-        old_sibling = Some(PathBuf::from(format!("{}.old", dest.display())));
-        std::fs::rename(&dest, old_sibling.as_ref().unwrap())?;
+        // This episode's file is being upgraded. Park aside whatever's
+        // actually here — the tracked row's real file and/or a stray file
+        // at `dest` with no tracked row — rather than deleting anything
+        // outright, so the replacement is placed and confirmed *before*
+        // the original is actually given up. See import_one's matching
+        // comment for the fuller reasoning; this is the same fix applied
+        // there.
+        for (existing_id, existing_path, _) in &existing_files {
+            let existing_path = PathBuf::from(existing_path);
+            if existing_path.exists() {
+                let parked_at = PathBuf::from(format!("{}.old", existing_path.display()));
+                std::fs::rename(&existing_path, &parked_at)?;
+                old_siblings.push(StaleFile {
+                    parked_at,
+                    restore_to: existing_path,
+                    row_id: Some(*existing_id),
+                });
+            } else {
+                old_siblings.push(StaleFile {
+                    parked_at: PathBuf::new(),
+                    restore_to: PathBuf::new(),
+                    row_id: Some(*existing_id),
+                });
+            }
+        }
+        if dest.exists() && old_siblings.iter().all(|s| s.restore_to != dest) {
+            let parked_at = PathBuf::from(format!("{}.old", dest.display()));
+            std::fs::rename(&dest, &parked_at)?;
+            old_siblings.push(StaleFile {
+                parked_at,
+                restore_to: dest.clone(),
+                row_id: None,
+            });
+        }
     }
 
     let needed_bytes = std::fs::metadata(source_path)?.len();
-    if insufficient_space(&dest_dir, needed_bytes)? {
-        if let Some(old_sibling) = &old_sibling {
-            std::fs::rename(old_sibling, &dest).ok();
+    if !same_filesystem(source_path, &dest_dir) && insufficient_space(&dest_dir, needed_bytes)? {
+        for stale in &old_siblings {
+            stale.restore();
         }
         anyhow::bail!(
             "not enough free space at {} for {needed_bytes} bytes (source: {})",
@@ -2112,19 +2298,20 @@ fn import_season_pack_file(
         );
     }
 
-    if let Err(err) = link_or_copy_file(source_path, &dest) {
-        if let Some(old_sibling) = &old_sibling {
-            std::fs::rename(old_sibling, &dest).ok();
+    if let Err(err) = move_or_copy_file(source_path, &dest) {
+        for stale in &old_siblings {
+            stale.restore();
         }
         return Err(err);
     }
 
-    if let Some(old_sibling) = old_sibling {
-        conn.execute(
-            "DELETE FROM episode_file WHERE path = ?1",
-            params![dest.to_string_lossy()],
-        )?;
-        std::fs::remove_file(&old_sibling).ok();
+    for stale in old_siblings {
+        if let Some(row_id) = stale.row_id {
+            conn.execute("DELETE FROM episode_file WHERE id = ?1", params![row_id])?;
+        }
+        if stale.parked_at.as_os_str().len() > 0 {
+            std::fs::remove_file(&stale.parked_at).ok();
+        }
     }
 
     let size_bytes = std::fs::metadata(&dest)?.len();
@@ -2723,6 +2910,124 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // Regression coverage for a real production finding: several shows had
+    // `episode` rows marked `has_file = 0` whose real file was sitting
+    // exactly where breadarr's own importer would have put it, with no
+    // `episode_file` row at all — almost certainly a residue of an earlier
+    // DB-recovery incident. This models that shape directly: an episode row
+    // with no matching episode_file, and a real file already at the
+    // expected season directory bearing breadarr's own SxxEyy marker.
+    #[test]
+    fn find_relinkable_episode_files_finds_a_file_with_no_tracked_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        let dir = std::env::temp_dir().join(format!("breadarr-relink-{}", std::process::id()));
+        media_item_with_root(&conn, 1, &dir);
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, title, has_file)
+             VALUES (1, 1, 2, 1, 'Seven Years Later', 0)",
+            [],
+        )
+        .unwrap();
+
+        let season_dir = dir.join("Season 02");
+        std::fs::create_dir_all(&season_dir).unwrap();
+        let real_file = season_dir.join("Some Show - S02E01 - Seven Years Later.mkv");
+        std::fs::write(&real_file, b"already on disk, never linked").unwrap();
+
+        let (candidates, ambiguous) = find_relinkable_episode_files(&conn).unwrap();
+        assert!(ambiguous.is_empty());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].episode_id, 1);
+        assert_eq!(candidates[0].path, real_file);
+
+        let linked = relink_episode_files(&conn, &candidates).unwrap();
+        assert_eq!(linked, 1);
+
+        let has_file: i64 = conn
+            .query_row("SELECT has_file FROM episode WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(has_file, 1);
+        let tracked_path: String = conn
+            .query_row(
+                "SELECT path FROM episode_file WHERE episode_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tracked_path, real_file.to_string_lossy());
+        // Purely additive — the file itself was never touched.
+        assert_eq!(std::fs::read(&real_file).unwrap(), b"already on disk, never linked");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Regression coverage for the wider pattern found across ~20 shows on
+    // real production data: a pre-breadarr library organized entirely under
+    // the unpadded "Season N" convention, with no zero-padded folder at all
+    // for that season. `season_dir` alone would never find anything here.
+    #[test]
+    fn find_relinkable_episode_files_falls_back_to_the_unpadded_season_folder() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        let dir = std::env::temp_dir().join(format!("breadarr-relink-unpadded-{}", std::process::id()));
+        media_item_with_root(&conn, 1, &dir);
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, title, has_file)
+             VALUES (1, 1, 1, 1, 'Pilot', 0)",
+            [],
+        )
+        .unwrap();
+
+        // No "Season 01" anywhere — only the unpadded convention.
+        let season_dir = dir.join("Season 1");
+        std::fs::create_dir_all(&season_dir).unwrap();
+        let real_file = season_dir.join("Some.Show.S01E01.Pilot.1080p.mkv");
+        std::fs::write(&real_file, b"pre-breadarr library content").unwrap();
+
+        let (candidates, ambiguous) = find_relinkable_episode_files(&conn).unwrap();
+        assert!(ambiguous.is_empty());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, real_file);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn find_relinkable_episode_files_skips_an_ambiguous_match_rather_than_guessing() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("breadarr-relink-ambiguous-{}", std::process::id()));
+        media_item_with_root(&conn, 1, &dir);
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, title, has_file)
+             VALUES (1, 1, 1, 1, 'Pilot', 0)",
+            [],
+        )
+        .unwrap();
+
+        let season_dir = dir.join("Season 01");
+        std::fs::create_dir_all(&season_dir).unwrap();
+        std::fs::write(season_dir.join("Some Show - S01E01 - Pilot.mkv"), b"one").unwrap();
+        std::fs::write(
+            season_dir.join("[Group] Some Show - S01E01 (dual audio).mkv"),
+            b"two",
+        )
+        .unwrap();
+
+        let (candidates, ambiguous) = find_relinkable_episode_files(&conn).unwrap();
+        assert!(candidates.is_empty(), "an ambiguous match must not be guessed at");
+        assert_eq!(ambiguous.len(), 1);
+
+        let tracked_count: i64 = conn
+            .query_row("SELECT count(*) FROM episode_file", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tracked_count, 0);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_fresh_grab_is_not_stalled() {
         let (conn, release_id) = seeded_release_conn(1.0);
@@ -2844,45 +3149,6 @@ mod tests {
     }
 
     #[test]
-    fn nearest_existing_ancestor_returns_the_path_itself_when_it_exists() {
-        let dir = std::env::temp_dir();
-        assert_eq!(nearest_existing_ancestor(&dir).unwrap(), dir);
-    }
-
-    #[test]
-    fn nearest_existing_ancestor_walks_up_past_nonexistent_components() {
-        let dir = std::env::temp_dir().join(format!(
-            "breadarr-ancestor-test-{}/does/not/exist/yet",
-            std::process::id()
-        ));
-        let expected =
-            std::env::temp_dir().join(format!("breadarr-ancestor-test-{}", std::process::id()));
-        std::fs::create_dir_all(&expected).unwrap();
-        assert_eq!(nearest_existing_ancestor(&dir).unwrap(), expected);
-        std::fs::remove_dir_all(&expected).unwrap();
-    }
-
-    #[test]
-    fn staging_dir_for_is_named_by_torrent_hash_under_the_marker_directory() {
-        let dest = std::env::temp_dir();
-        let staging = staging_dir_for(&dest, "deadbeef1234").unwrap();
-        assert_eq!(
-            staging.file_name().unwrap().to_str().unwrap(),
-            "deadbeef1234"
-        );
-        assert_eq!(
-            staging
-                .parent()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            STAGING_DIR_NAME
-        );
-    }
-
-    #[test]
     fn insufficient_space_is_false_for_a_trivially_small_request() {
         assert!(!insufficient_space(&std::env::temp_dir(), 1).unwrap());
     }
@@ -2891,6 +3157,42 @@ mod tests {
     fn insufficient_space_is_true_for_an_absurd_request() {
         // No real filesystem has an exabyte free.
         assert!(insufficient_space(&std::env::temp_dir(), u64::MAX / 2).unwrap());
+    }
+
+    // Regression test for a real gap found in review: `insufficient_space`
+    // checks `dest`'s free space against the *full* source file size, but
+    // `move_or_copy_file` tries a same-filesystem `rename` first, which
+    // needs essentially none. Two paths under the same temp dir are
+    // guaranteed to share a device, so this exercises the exact case that
+    // used to produce false "not enough free space" rejections (and, via
+    // the grab-fail-search retry loop, a permanent stuck cycle) whenever
+    // downloads and the library share a volume.
+    #[test]
+    fn same_filesystem_is_true_for_two_paths_under_the_same_temp_dir() {
+        let dir = std::env::temp_dir().join(format!("breadarr-same-fs-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.mkv");
+        let b = dir.join("subdir");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(&a, b"x").unwrap();
+
+        assert!(same_filesystem(&a, &b), "two paths under the same temp dir must share a device");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn same_filesystem_is_false_when_either_path_cannot_be_stat_d() {
+        let dir = std::env::temp_dir().join(format!("breadarr-same-fs-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("does-not-exist.mkv");
+
+        assert!(
+            !same_filesystem(&dir, &missing),
+            "a stat failure must default to 'different filesystems' so the free-space check still runs"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2915,18 +3217,18 @@ mod tests {
     }
 
     #[test]
-    fn link_or_copy_file_leaves_the_source_in_place() {
-        let dir = std::env::temp_dir().join(format!("breadarr-link-test-{}", std::process::id()));
+    fn move_or_copy_file_moves_the_source_out() {
+        let dir = std::env::temp_dir().join(format!("breadarr-move-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("source.mkv");
         std::fs::write(&src, b"fake video data").unwrap();
         let dest = dir.join("dest.mkv");
 
-        link_or_copy_file(&src, &dest).unwrap();
+        move_or_copy_file(&src, &dest).unwrap();
 
-        assert!(src.exists(), "source should survive a hardlink-or-copy");
+        assert!(!src.exists(), "source should be gone after a move — nothing seeds it anymore");
         assert!(dest.exists());
-        assert_eq!(std::fs::read(&src).unwrap(), std::fs::read(&dest).unwrap());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"fake video data");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3069,7 +3371,7 @@ mod tests {
             // absent — simulating torrents qBit no longer knows about.
         ];
 
-        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
+        let (stats, _) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
 
         assert_eq!(stats.imported, 1);
         assert_eq!(stats.skipped_incomplete, 1);
@@ -3131,7 +3433,7 @@ mod tests {
             content_path: "/tmp/somewhere-mid-move".to_string(),
         }];
 
-        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
+        let (stats, _) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
         assert_eq!(stats.imported, 0);
         assert_eq!(stats.skipped_incomplete, 1);
         assert_eq!(stats.errors, 0);
@@ -3188,7 +3490,7 @@ mod tests {
 
         for i in 1..MAX_IMPORT_ERRORS {
             let pending = fetch_pending_grabs(&conn).unwrap();
-            let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
+            let (stats, _) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
             assert_eq!(stats.errors, 1, "iteration {i}");
             assert_eq!(stats.failed, 0, "iteration {i}");
             let status: String = conn
@@ -3199,7 +3501,7 @@ mod tests {
 
         // The Nth failure crosses the threshold and gives up.
         let pending = fetch_pending_grabs(&conn).unwrap();
-        let stats = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
+        let (stats, _) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
         assert_eq!(stats.failed, 1);
         assert_eq!(stats.errors, 0);
         let status: String = conn
@@ -3262,8 +3564,8 @@ mod tests {
         let dest = dest_root.join("Some Movie (2016).mp4");
         assert!(dest.exists(), "expected {} to exist", dest.display());
         assert!(
-            content.exists(),
-            "source file should survive import so qBittorrent can keep seeding"
+            !content.exists(),
+            "source file should be moved into place, not left behind"
         );
 
         let status: String = conn
@@ -3322,8 +3624,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dest_root = dir.join("library");
         std::fs::create_dir_all(&dest_root).unwrap();
-        let content = dir.join("Some.Movie.2016.1080p.mp4");
-        std::fs::write(&content, b"fake movie data").unwrap();
+        // A real, probeable h264/1080p clip, not placeholder bytes: since
+        // `should_enqueue` now requires a successful probe (a `probe_failed`
+        // NULL-codec/NULL-height row must never enqueue an unclaimable job —
+        // see `should_enqueue`'s doc comment), a fake file would make
+        // `ensure_probed` record `probe_failed` and this test would no
+        // longer exercise the real "should this file be transcoded" path.
+        let content = dir.join("Some.Movie.2016.1080p.mkv");
+        let clip = generate_test_clip(&dir, 1920, 1080);
+        std::fs::rename(&clip, &content).unwrap();
 
         let grab = PendingGrab::Movie {
             release_id: 1,
@@ -3356,7 +3665,7 @@ mod tests {
     }
 
     #[test]
-    fn import_one_does_not_enqueue_a_transcode_job_for_anime() {
+    fn import_one_enqueues_an_anime_tagged_transcode_job_for_anime() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init(&conn).unwrap();
         conn.execute(
@@ -3395,8 +3704,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dest_root = dir.join("library");
         std::fs::create_dir_all(&dest_root).unwrap();
-        let content = dir.join("Some.Anime.S01E01.mp4");
-        std::fs::write(&content, b"fake anime data").unwrap();
+        // Real, probeable content — see the sibling
+        // `import_one_enqueues_a_transcode_job_when_transcode_is_enabled`
+        // test for why a fake file no longer exercises this path now that
+        // `should_enqueue` requires an actual successful probe.
+        let content = dir.join("Some.Anime.S01E01.mkv");
+        let clip = generate_test_clip(&dir, 1920, 1080);
+        std::fs::rename(&clip, &content).unwrap();
 
         let grab = PendingGrab::Episode {
             release_id: 1,
@@ -3412,10 +3726,17 @@ mod tests {
 
         import_one(&conn, &grab, &content, Some(&breadarr_shared::config::TranscodeConfig::default())).unwrap();
 
-        let job_count: i64 = conn
-            .query_row("SELECT count(*) FROM transcode_job", [], |r| r.get(0))
+        // Anime is no longer excluded from transcoding — it's routed to its
+        // own pipeline (`is_anime = 1` on the job row), not skipped.
+        let (job_count, is_anime): (i64, i64) = conn
+            .query_row(
+                "SELECT count(*), max(is_anime) FROM transcode_job",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
-        assert_eq!(job_count, 0);
+        assert_eq!(job_count, 1);
+        assert_eq!(is_anime, 1, "job must be tagged is_anime via anime_mapping");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3757,6 +4078,9 @@ mod tests {
             std::fs::read(&dest).unwrap(),
             b"the better file, already imported"
         );
+        // The losing download is cleaned up rather than left as a dangling
+        // duplicate — nothing seeds it and it lost the comparison.
+        assert!(!content.exists(), "the losing download should be deleted, not left behind");
 
         let status: String = conn
             .query_row("SELECT status FROM release WHERE id = 2", [], |r| r.get(0))
@@ -3767,9 +4091,7 @@ mod tests {
     }
 
     #[test]
-    fn a_strictly_better_release_replaces_the_existing_file_via_a_real_hardlink_swap() {
-        use std::os::unix::fs::MetadataExt;
-
+    fn a_strictly_better_release_replaces_the_existing_file_via_a_real_move() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init(&conn).unwrap();
         conn.execute(
@@ -3832,13 +4154,9 @@ mod tests {
 
         // The new file's content landed at the shared deterministic path.
         assert_eq!(std::fs::read(&dest).unwrap(), b"the new, better file");
-        // It's a genuine hardlink to the source (same inode), not a copy —
-        // confirms the old file/row was cleared first so `hard_link`
-        // itself succeeded instead of falling back to `copy_via_temp_file`.
-        assert_eq!(
-            std::fs::metadata(&dest).unwrap().ino(),
-            std::fs::metadata(&content).unwrap().ino()
-        );
+        // The source is gone — it was moved, not copied or hardlinked
+        // alongside a surviving original.
+        assert!(!content.exists(), "source should be moved, not left behind");
 
         // Exactly one episode_file row survives for this movie — the old
         // one was removed, not left behind as a duplicate alongside the new.
@@ -3850,6 +4168,200 @@ mod tests {
             )
             .unwrap();
         assert_eq!(file_count, 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Regression test for a real gap found in review: nothing in the schema
+    // enforces one `episode_file` per episode (the `library_health`
+    // duplicate-groups report exists precisely because duplicates occur),
+    // but the old lookup used `query_row`, which silently returns only one
+    // arbitrary matching row. A second duplicate row was left completely
+    // untouched — its `upgrade_locked` flag never even consulted, and its
+    // file never parked-and-cleaned-up alongside the winning replacement.
+    // This seeds two rows for the same movie and asserts the upgrade sweeps
+    // both: both old files gone from disk, both old rows gone from the DB,
+    // exactly one row/file survives.
+    #[test]
+    fn an_upgrade_swap_sweeps_every_duplicate_episode_file_row_not_just_one() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_item (id, kind, title, year, monitored, quality_profile_id, root_folder)
+             VALUES (1, 'movie', 'Some Movie', 2016, 1, 1, '/tmp')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source (id, name, kind, base_url) VALUES (1, 'tpb', 'scrape', 'http://x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO release (id, media_item_id, episode_id, raw_title, source_id, guid, score, status, torrent_hash, grabbed_at)
+             VALUES (2, 1, NULL, 'Some Movie 2016 1080p', 1, 'guid-2', 20.0, 'grabbed', 'bbbb', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-duplicate-episode-file-sweep-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest_root = dir.join("library");
+        std::fs::create_dir_all(&dest_root).unwrap();
+
+        // Two duplicate rows for the same movie, each with its own real
+        // file on disk, neither at the deterministic `dest` path (so this
+        // also exercises the identity-lookup path, not the `dest.exists()`
+        // fallback).
+        let stray_a = dir.join("stray-a.mp4");
+        std::fs::write(&stray_a, b"duplicate row A's file").unwrap();
+        conn.execute(
+            "INSERT INTO episode_file (id, episode_id, media_item_id, path, size_bytes, subtitle_status)
+             VALUES (10, NULL, 1, ?1, 20, 'none')",
+            params![stray_a.to_string_lossy()],
+        )
+        .unwrap();
+        let stray_b = dir.join("stray-b.mp4");
+        std::fs::write(&stray_b, b"duplicate row B's file").unwrap();
+        conn.execute(
+            "INSERT INTO episode_file (id, episode_id, media_item_id, path, size_bytes, subtitle_status)
+             VALUES (11, NULL, 1, ?1, 20, 'none')",
+            params![stray_b.to_string_lossy()],
+        )
+        .unwrap();
+
+        let content = dir.join("Some.Movie.2016.1080p.mp4");
+        std::fs::write(&content, b"the new, better file").unwrap();
+
+        let grab = PendingGrab::Movie {
+            release_id: 2,
+            media_item_id: 1,
+            torrent_hash: "bbbb".to_string(),
+            title: "Some Movie".to_string(),
+            year: Some(2016),
+            root_folder: dest_root.to_string_lossy().to_string(),
+        };
+
+        let outcome = import_one(&conn, &grab, &content, None).unwrap();
+        assert!(matches!(outcome, ImportOutcome::Imported { .. }));
+
+        assert!(!stray_a.exists(), "duplicate row A's file must be cleaned up, not orphaned");
+        assert!(!stray_b.exists(), "duplicate row B's file must be cleaned up, not orphaned");
+
+        let remaining: Vec<i64> = conn
+            .prepare("SELECT id FROM episode_file WHERE media_item_id = 1")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "both duplicate rows must be swept, leaving exactly the new one, got {remaining:?}"
+        );
+        assert!(
+            !remaining.contains(&10) && !remaining.contains(&11),
+            "the surviving row must be the newly inserted one, not a stale duplicate"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Regression test for a real production bug: a movie's `root_folder`
+    // drifted (recategorized between library folders — the exact shape of
+    // a real incident found on "Cars 3", tracked at `.../Kids Movies/...`
+    // while `root_folder` had since moved to `.../Movies/...`) after it was
+    // already imported. The old dest-collision check only fired on
+    // `dest.exists()`, which came back false once the destination path no
+    // longer matched where the tracked file actually lived — so the score
+    // comparison was skipped entirely and a fresh grab landed right in
+    // alongside the untouched original, a real duplicate. This asserts the
+    // comparison still happens (and the two copies get consolidated into
+    // one) even when the tracked path and the freshly computed `dest`
+    // disagree.
+    #[test]
+    fn a_drifted_root_folder_does_not_defeat_the_dest_collision_check() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_item (id, kind, title, year, monitored, quality_profile_id, root_folder)
+             VALUES (1, 'movie', 'Cars 3', 2017, 1, 1, '/tmp')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source (id, name, kind, base_url) VALUES (1, 'tpb', 'scrape', 'http://x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO release (id, media_item_id, episode_id, raw_title, source_id, guid, score, status, torrent_hash, grabbed_at)
+             VALUES (1, 1, NULL, 'Cars 3 2017 720p', 1, 'guid-1', 5.0, 'imported', 'aaaa', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO release (id, media_item_id, episode_id, raw_title, source_id, guid, score, status, torrent_hash, grabbed_at)
+             VALUES (2, 1, NULL, 'Cars 3 2017 1080p', 1, 'guid-2', 20.0, 'grabbed', 'bbbb', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("breadarr-drift-{}", std::process::id()));
+        // The tracked file's real home: an old category folder, no longer
+        // matching the movie's current `root_folder`.
+        let old_root = dir.join("Kids Movies").join("Cars 3 (2017)");
+        std::fs::create_dir_all(&old_root).unwrap();
+        let old_path = old_root.join("Cars 3 (2017).mp4");
+        std::fs::write(&old_path, b"the old, smaller tracked file").unwrap();
+        conn.execute(
+            "INSERT INTO episode_file (id, episode_id, media_item_id, path, size_bytes, subtitle_status)
+             VALUES (1, NULL, 1, ?1, 20, 'none')",
+            params![old_path.to_string_lossy()],
+        )
+        .unwrap();
+
+        // The movie's root_folder has since drifted to a different folder —
+        // `dest` will never equal `old_path`.
+        let new_root = dir.join("Movies").join("Cars 3 (2017)");
+        std::fs::create_dir_all(&new_root).unwrap();
+
+        let content = dir.join("Cars.3.2017.1080p.mp4");
+        std::fs::write(&content, b"the new, better file").unwrap();
+
+        let grab = PendingGrab::Movie {
+            release_id: 2,
+            media_item_id: 1,
+            torrent_hash: "bbbb".to_string(),
+            title: "Cars 3".to_string(),
+            year: Some(2017),
+            root_folder: new_root.to_string_lossy().to_string(),
+        };
+
+        let outcome = import_one(&conn, &grab, &content, None).unwrap();
+        assert!(matches!(outcome, ImportOutcome::Imported { .. }));
+
+        let dest = new_root.join("Cars 3 (2017).mp4");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the new, better file");
+        // The old tracked file, at its own (different) path, is gone —
+        // consolidated, not left behind as an untracked duplicate.
+        assert!(
+            !old_path.exists(),
+            "the old tracked file should be cleaned up even though its path never matched dest"
+        );
+
+        let file_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM episode_file WHERE media_item_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(file_count, 1, "exactly one tracked file should survive, not two");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -4070,6 +4582,10 @@ mod tests {
             std::fs::read(&existing).unwrap(),
             b"locally-transcoded e01",
             "the locked, locally-transcoded file must survive untouched regardless of score"
+        );
+        assert!(
+            !pack_dir.join("Show.S01E01.mkv").exists(),
+            "the skipped pack file should be deleted, not left behind in the pack directory"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();

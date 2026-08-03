@@ -14,6 +14,11 @@ pub struct AudioStream {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubtitleStream {
     pub language: Option<String>,
+    /// mov_text (mp4's timed-text subtitle codec) isn't valid inside a
+    /// Matroska container — a transcode pipeline that always outputs `.mkv`
+    /// needs to know this per-stream to convert rather than blindly stream
+    /// copy. See `transcode::subtitle_codec_args`.
+    pub codec: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -109,6 +114,16 @@ pub fn probe(path: &Path) -> Result<MediaProbe> {
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).context("ffprobe output was not valid JSON")?;
 
+    Ok(build_media_probe(&json, raw_json))
+}
+
+/// The actual JSON-to-`MediaProbe` mapping, split out from `probe` so it can
+/// be unit-tested directly against hand-built ffprobe-shaped JSON — real
+/// muxers are inconsistent enough about stream ordering/disposition (see
+/// `probe_finds_the_real_video_stream_even_when_attached_pic_comes_first`'s
+/// doc comment) that constructing every case as an actual file via `ffmpeg`
+/// isn't always practical.
+fn build_media_probe(json: &serde_json::Value, raw_json: String) -> MediaProbe {
     let format = &json["format"];
     let duration_secs = format["duration"]
         .as_str()
@@ -134,11 +149,18 @@ pub fn probe(path: &Path) -> Result<MediaProbe> {
             .as_str()
             .or_else(|| stream["tags"]["LANGUAGE"].as_str())
             .map(str::to_string);
+        let is_attached_pic = stream["disposition"]["attached_pic"].as_i64() == Some(1);
         match codec_type {
-            "video" if probe.video_codec.is_none() => {
-                // First video stream only — a second "video" stream in a
-                // real-world file is almost always an embedded cover-art
-                // thumbnail, not a second picture track.
+            // First non-attached-pic video stream — a second "video" stream
+            // in a real-world file is almost always an embedded cover-art
+            // thumbnail, not a second picture track, and ffmpeg does not
+            // guarantee it comes *after* the real content stream (some mp4
+            // remuxes and mkvmerge outputs put it first). Explicitly
+            // checking `disposition.attached_pic` rather than relying on
+            // stream order means a cover-art-first file no longer has its
+            // actual video codec/height silently replaced by the
+            // thumbnail's.
+            "video" if probe.video_codec.is_none() && !is_attached_pic => {
                 probe.video_codec = stream["codec_name"].as_str().map(str::to_string);
                 probe.width = stream["width"].as_i64();
                 probe.height = stream["height"].as_i64();
@@ -164,13 +186,14 @@ pub fn probe(path: &Path) -> Result<MediaProbe> {
                 });
             }
             "subtitle" => {
-                probe.subtitles.push(SubtitleStream { language });
+                let codec = stream["codec_name"].as_str().map(str::to_string);
+                probe.subtitles.push(SubtitleStream { language, codec });
             }
             _ => {}
         }
     }
 
-    Ok(probe)
+    probe
 }
 
 /// ffprobe reports frame rate as a "num/den" fraction string (e.g.
@@ -214,6 +237,59 @@ pub fn verify_decodable(path: &Path) -> Result<DecodeCheck> {
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ))
     }
+}
+
+/// Bounded, sampled variant of `verify_decodable` for callers where a full
+/// decode's O(duration) cost is the actual bottleneck — the transcode
+/// pipeline measured this in practice: two concurrent full-file decode
+/// verifications pinned two CPU cores at 400%+ each for the whole
+/// verification pass, dwarfing the GPU encode time itself for long files.
+///
+/// Decodes only fixed-size windows (`sample_secs` each) near the start,
+/// middle, and end of the file, rather than every frame — a deliberate
+/// trade of "catches most real corruption cheaply" for "bounded cost
+/// regardless of file length", not equivalent thoroughness to a full
+/// decode. Truncation specifically doesn't need this: `encode_and_verify`'s
+/// separate duration-match check against the original already catches that
+/// regardless of what this function samples, since a truncated output's
+/// container-reported duration comes up short either way.
+///
+/// Falls back to a full `verify_decodable` when `duration_secs` is small
+/// enough that sampling wouldn't save meaningful time anyway.
+pub fn verify_decodable_sampled(
+    path: &Path,
+    duration_secs: f64,
+    sample_secs: f64,
+) -> Result<DecodeCheck> {
+    if duration_secs <= sample_secs * 3.0 {
+        return verify_decodable(path);
+    }
+
+    let windows = [
+        0.0,
+        (duration_secs / 2.0 - sample_secs / 2.0).max(0.0),
+        (duration_secs - sample_secs).max(0.0),
+    ];
+
+    for start in windows {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-v", "error", "-xerror"]);
+        if start > 0.0 {
+            cmd.args(["-ss", &format!("{start:.2}")]);
+        }
+        cmd.arg("-i").arg(path);
+        cmd.args(["-t", &format!("{sample_secs:.2}"), "-f", "null", "-"]);
+        let output = cmd
+            .output()
+            .context("failed to run ffmpeg for sampled decode verification")?;
+
+        if !(output.status.success() && output.stderr.is_empty()) {
+            return Ok(DecodeCheck::Corrupt(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+    }
+    Ok(DecodeCheck::Ok)
 }
 
 #[cfg(test)]
@@ -297,6 +373,78 @@ mod tests {
         assert!(result.is_err());
     }
 
+    fn generate_clip(dir: &Path, name: &str, duration_secs: u32) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc=size=320x240:duration={duration_secs}:rate=5"),
+            ])
+            .args(["-c:v", "libx264", "-preset", "ultrafast"])
+            .arg(&path)
+            .output()
+            .expect("failed to run ffmpeg to generate a test clip");
+        assert!(
+            status.status.success(),
+            "ffmpeg failed to generate a test clip: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        path
+    }
+
+    #[test]
+    fn verify_decodable_sampled_passes_a_genuinely_intact_short_file() {
+        // Short enough to hit the "falls back to a full check" path.
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-ffprobe-sampled-short-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = generate_clip(&dir, "short.mkv", 2);
+
+        let result = verify_decodable_sampled(&clip, 2.0, 20.0).unwrap();
+        assert!(matches!(result, DecodeCheck::Ok));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn verify_decodable_sampled_passes_a_genuinely_intact_long_file() {
+        // Long enough (duration > sample_secs * 3) to actually exercise the
+        // windowed start/middle/end sampling path, not the short-file
+        // fallback.
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-ffprobe-sampled-long-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = generate_clip(&dir, "long.mkv", 10);
+
+        let result = verify_decodable_sampled(&clip, 10.0, 2.0).unwrap();
+        assert!(matches!(result, DecodeCheck::Ok));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn verify_decodable_sampled_flags_a_file_that_does_not_decode_at_all() {
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-ffprobe-sampled-corrupt-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("corrupt.mkv");
+        std::fs::write(&path, b"this is not a real video file").unwrap();
+
+        let result = verify_decodable_sampled(&path, 10.0, 2.0).unwrap();
+        assert!(matches!(result, DecodeCheck::Corrupt(_)));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Generates a tiny real video via ffmpeg's `lavfi` synthetic source —
     /// validates the actual JSON field extraction (width/height/codec/
     /// duration/audio language+default) against genuine ffprobe output,
@@ -375,5 +523,83 @@ mod tests {
         assert!(serde_json::from_str::<serde_json::Value>(&probe.raw_json).is_ok());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Regression test for a real gap found in review: `probe`'s "first video
+    // stream wins" selection used to have no idea about
+    // `disposition.attached_pic` and just trusted stream order — a
+    // convention real muxers don't reliably follow (ffmpeg's own mp4 muxer
+    // was observed reordering an attached-pic stream to the *end*
+    // regardless of requested `-map` order, which makes constructing a
+    // genuine cover-art-*first* file via `ffmpeg` impractical — so this
+    // exercises `build_media_probe` directly against hand-built,
+    // real-shaped ffprobe JSON instead of a generated file, deterministically
+    // covering the ordering `ffmpeg`'s own tooling won't produce). Unlike
+    // `generate_clip_with_attached_pic` in `transcode::mod::tests` (cover
+    // art second, the already-handled case), this puts it *first* to prove
+    // the fix is order-independent, not just "skip the second video
+    // stream".
+    #[test]
+    fn probe_finds_the_real_video_stream_even_when_attached_pic_comes_first() {
+        let json = serde_json::json!({
+            "format": { "duration": "10.0", "bit_rate": "5000000", "format_long_name": "Matroska / WebM" },
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "png",
+                    "width": 64,
+                    "height": 64,
+                    "disposition": { "attached_pic": 1 }
+                },
+                {
+                    "index": 1,
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 640,
+                    "height": 360,
+                    "disposition": { "attached_pic": 0 }
+                }
+            ]
+        });
+
+        let probe = build_media_probe(&json, "{}".to_string());
+        assert_eq!(probe.width, Some(640), "must pick the real content stream's width, not the 64x64 cover art's");
+        assert_eq!(probe.height, Some(360), "must pick the real content stream's height, not the 64x64 cover art's");
+        assert_eq!(probe.video_codec.as_deref(), Some("h264"), "must pick the real content stream's codec, not the cover art's png");
+    }
+
+    // Companion case: attached-pic *second* (the ordering the code
+    // previously assumed was the only one) must still work exactly as
+    // before — this fix is additive, not a behavior change for the
+    // already-handled ordering.
+    #[test]
+    fn probe_finds_the_real_video_stream_when_attached_pic_comes_second() {
+        let json = serde_json::json!({
+            "format": { "duration": "10.0", "bit_rate": "5000000", "format_long_name": "Matroska / WebM" },
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 640,
+                    "height": 360,
+                    "disposition": { "attached_pic": 0 }
+                },
+                {
+                    "index": 1,
+                    "codec_type": "video",
+                    "codec_name": "png",
+                    "width": 64,
+                    "height": 64,
+                    "disposition": { "attached_pic": 1 }
+                }
+            ]
+        });
+
+        let probe = build_media_probe(&json, "{}".to_string());
+        assert_eq!(probe.width, Some(640));
+        assert_eq!(probe.height, Some(360));
+        assert_eq!(probe.video_codec.as_deref(), Some("h264"));
     }
 }

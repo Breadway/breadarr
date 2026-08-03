@@ -297,14 +297,42 @@ pub struct TranscodeConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_vaapi_device")]
     pub vaapi_device: String,
+    /// Applies to both pipelines identically when Jellyfin reports an
+    /// active transcoding session — deliberately not split per-pipeline;
+    /// when someone's actually watching something, both the GPU (which
+    /// they're using) and CPU (contending for the same box) should back off.
     #[serde(default = "default_parallelism_min")]
     pub parallelism_min: usize,
-    /// Ramp-up ceiling for concurrent encode streams during a backfill —
-    /// tune this against how many simultaneous `av1_vaapi` sessions the
-    /// target GPU can actually sustain before per-stream throughput starts
-    /// dropping, not just picked arbitrarily.
+    /// The total concurrent **live-action** (`av1_vaapi`, GPU-bound) stream
+    /// budget — not just "the batch job's cap", but the real ceiling the
+    /// GPU can sustain at all, batch work and live Jellyfin viewers
+    /// combined. `transcode::live_action_parallelism_for` subtracts however
+    /// many Jellyfin transcode sessions are actually active from this
+    /// number to get the batch job's actual parallelism each cycle, so
+    /// real viewers get exactly the headroom they need rather than the
+    /// batch job dropping to a flat minimum regardless of how many people
+    /// are watching. Deliberately separate from `parallelism_max_anime` —
+    /// the two pipelines contend for genuinely different hardware (GPU
+    /// encode engine vs CPU threads), so raising one shouldn't raise the
+    /// other. Empirically calibrated on Hestia's Arc A380: per-stream
+    /// throughput stays above 1.5x realtime through 7 concurrent streams,
+    /// crosses below it at 8 (aggregate throughput itself plateaus around
+    /// ~12x realtime from 5-6 streams on, i.e. the GPU's actual saturation
+    /// point) — see [[breadarr-av1-transcode]] for the full scaling-test
+    /// numbers.
     #[serde(default = "default_parallelism_max")]
     pub parallelism_max: usize,
+    /// Ramp-up ceiling for concurrent **anime** (`libsvtav1`, CPU-bound)
+    /// encode streams — capped separately from `parallelism_max` (see its
+    /// doc comment) precisely because a single shared cap would let "raise
+    /// GPU parallelism" accidentally also raise anime concurrency, and
+    /// anime jobs are CPU-thread-hungry (`anime_svtav1_max_threads` each)
+    /// in a way live-action jobs aren't. Kept at the original
+    /// conservative shared-cap default (2) since concurrent-anime-job
+    /// memory/CPU behavior at higher counts hasn't been load-tested the
+    /// way the live-action GPU path has.
+    #[serde(default = "default_parallelism_max_anime")]
+    pub parallelism_max_anime: usize,
     /// The "looks fine, no complaints" calibration reference: a real
     /// bitrate (Mbps, in kbps here) from content already in the library at
     /// `reference_height` that the user is happy with. New AV1 encodes are
@@ -332,6 +360,82 @@ pub struct TranscodeConfig {
     /// anyway) — revisit once HDR handling is confirmed safe.
     #[serde(default = "default_exclude_min_height")]
     pub exclude_min_height: u32,
+    /// `global_quality` for the live-action `av1_vaapi` `QVBR` encode — the
+    /// actual quality driver now that rate control is quality-based rather
+    /// than a flat bitrate target (see `run_ffmpeg_encode_live_action`).
+    /// `reference_bitrate_kbps`/`av1_efficiency_factor` still compute a
+    /// `-b:v`/`-maxrate`/`-bufsize` ceiling alongside this, so a source that's
+    /// already unusually efficient doesn't get inflated up toward the
+    /// ceiling — QVBR only spends up to it on content that actually needs it.
+    #[serde(default = "default_quality_live_action")]
+    pub quality_live_action: u32,
+    /// Root folder path prefixes (exact string prefix match against
+    /// `episode_file.path`) routed to the anime encode pipeline
+    /// (`run_ffmpeg_encode_anime`) instead of the live-action one, regardless
+    /// of `anime_mapping`/`anime_tmdb_movie` metadata coverage — path is a
+    /// more reliable signal than TVDB/TMDB anime-list membership, which has
+    /// real gaps (e.g. Avatar: The Last Airbender and some Dragon Ball movies
+    /// were missing from those tables and slipped through as "not anime").
+    /// Empty by default (a no-op) — set per-deployment to match how the
+    /// library is actually organized.
+    #[serde(default)]
+    pub anime_root_folders: Vec<String>,
+    /// CRF for the anime pipeline's software `libsvtav1` encode (0-63, lower
+    /// = higher quality/larger). No hardware AV1 10-bit encode entrypoint
+    /// exists on Hestia's Arc A380 (`vainfo` only lists `AV1Profile0`,
+    /// 8-bit) — anime needs true 10-bit output to avoid banding in the flat
+    /// gradients the art style is full of, so this pipeline trades GPU
+    /// offload for CPU-based `libsvtav1` specifically to get it.
+    #[serde(default = "default_quality_anime")]
+    pub quality_anime: u32,
+    /// `libsvtav1` preset (0-13, lower = slower/better compression AND more
+    /// memory-hungry — SVT-AV1's lookahead/reference buffering scales with
+    /// preset, not just thread count). Raised from an initial guess of 6 to
+    /// 10 after a real validation run hit a genuine kernel OOM: preset 6 on
+    /// a single 1080p anime episode grew to 9.3GB resident memory on
+    /// Hestia's 6-core/12-thread box. This runs as unattended background
+    /// work, so trading some compression efficiency for a much smaller,
+    /// safer memory footprint is the right call — see
+    /// `anime_svtav1_max_threads` for the other half of that fix.
+    #[serde(default = "default_anime_svtav1_preset")]
+    pub anime_svtav1_preset: u32,
+    /// Passed to `libsvtav1` as `-svtav1-params lp=N` — caps how many
+    /// worker threads it uses, independent of preset. More parallel workers
+    /// means more concurrently-buffered frames, so this is the other lever
+    /// (alongside `anime_svtav1_preset`) for bounding the encoder's peak
+    /// memory to something predictable regardless of how many cores the
+    /// host actually has. Default is conservative (well under a typical
+    /// modern host's core count) after the same OOM incident that raised
+    /// the preset default.
+    #[serde(default = "default_anime_svtav1_max_threads")]
+    pub anime_svtav1_max_threads: u32,
+    /// Hard floor on what counts as "worth keeping": a transcode whose
+    /// output isn't at least this fraction smaller than the original is
+    /// discarded (job marked `skipped`, original left untouched) rather than
+    /// swapped in. Exists because quality-driven rate control can still
+    /// occasionally produce an output that's the same size as or larger than
+    /// an already-efficient source — this is the invariant that makes that
+    /// safe regardless of how good the rate-control tuning is, after a real
+    /// incident where flat-bitrate VBR targeting silently produced files
+    /// *larger* than the original on the majority of a backfill.
+    #[serde(default = "default_min_size_reduction_pct")]
+    pub min_size_reduction_pct: f64,
+    /// Skip attempting a transcode at all (no GPU/CPU time spent) when the
+    /// source's current bitrate is already at or below this fraction of the
+    /// resolution-scaled ceiling (`target_bitrate_kbps`) — a strong signal
+    /// there's little room left to save, so it's not worth the encode time
+    /// to find out (the `min_size_reduction_pct` check above would reject
+    /// most of these anyway, this just avoids paying for that finding).
+    #[serde(default = "default_skip_below_ceiling_ratio")]
+    pub skip_below_ceiling_ratio: f64,
+    /// Size (seconds) of each of the three start/middle/end windows
+    /// `ffprobe::verify_decodable_sampled` actually decodes, instead of the
+    /// whole file — a full decode verification was measured as the actual
+    /// CPU bottleneck of a transcode cycle (400%+ CPU per job, dwarfing the
+    /// GPU encode time), not the encode itself. Bounds verification cost to
+    /// a small constant regardless of source length.
+    #[serde(default = "default_verify_sample_secs")]
+    pub verify_sample_secs: f64,
 }
 
 impl Default for TranscodeConfig {
@@ -342,11 +446,20 @@ impl Default for TranscodeConfig {
             vaapi_device: default_vaapi_device(),
             parallelism_min: default_parallelism_min(),
             parallelism_max: default_parallelism_max(),
+            parallelism_max_anime: default_parallelism_max_anime(),
             reference_bitrate_kbps: default_reference_bitrate_kbps(),
             reference_height: default_reference_height(),
             av1_efficiency_factor: default_av1_efficiency_factor(),
             exclude_hdr: default_exclude_hdr(),
             exclude_min_height: default_exclude_min_height(),
+            quality_live_action: default_quality_live_action(),
+            anime_root_folders: Vec::new(),
+            quality_anime: default_quality_anime(),
+            anime_svtav1_preset: default_anime_svtav1_preset(),
+            anime_svtav1_max_threads: default_anime_svtav1_max_threads(),
+            min_size_reduction_pct: default_min_size_reduction_pct(),
+            skip_below_ceiling_ratio: default_skip_below_ceiling_ratio(),
+            verify_sample_secs: default_verify_sample_secs(),
         }
     }
 }
@@ -364,12 +477,25 @@ fn default_parallelism_min() -> usize {
 }
 
 fn default_parallelism_max() -> usize {
-    // Conservative on purpose: a real incident on a shared 15GB host
-    // running a dozen+ other containers showed concurrent 1080p/4K
-    // decode+encode sessions can push memory pressure into swap fast
-    // enough to trigger the OOM killer well before the GPU itself is the
-    // bottleneck. Raise this deliberately, per-deployment, once you've
-    // watched `free -h` under real load at the current setting.
+    // The measured total GPU budget (not "batch cap plus a static
+    // reservation") — `live_action_parallelism_for` dynamically subtracts
+    // real Jellyfin transcode sessions from this each cycle. Raised from
+    // an initial conservative guess of 2 after an actual concurrent-stream
+    // scaling test on Hestia's Arc A380 (see `parallelism_max`'s doc
+    // comment): per-stream throughput stays above 1.5x realtime through 7
+    // total concurrent streams, crossing below at 8.
+    7
+}
+
+fn default_parallelism_max_anime() -> usize {
+    // Kept at the original conservative shared-cap value — unlike
+    // `parallelism_max`, this hasn't been load-tested at higher counts.
+    // A real incident already showed a *single* uncapped anime job could
+    // hit 9.3GB resident memory; multiple concurrent anime jobs (each its
+    // own `anime_svtav1_max_threads`-sized thread pool) multiply both CPU
+    // thread contention and memory pressure in a way the GPU path doesn't
+    // have to worry about. Raise deliberately, per-deployment, only after
+    // watching `free -h` and CPU load under real concurrent-anime load.
     2
 }
 
@@ -391,6 +517,43 @@ fn default_exclude_hdr() -> bool {
 
 fn default_exclude_min_height() -> u32 {
     2000
+}
+
+// Starting point for `av1_vaapi`'s `-global_quality` under `QVBR`, needs the
+// same real-hardware calibration pass as the bitrate reference did — this is
+// a reasonable guess (roughly x264/x265 "visually near-lossless" territory
+// on the encoder's internal QP-like scale), not a measured value.
+fn default_quality_live_action() -> u32 {
+    26
+}
+
+// SVT-AV1 CRF starting point for the anime pipeline — slightly lower
+// (higher quality) than the live-action guess above since flat-color/
+// gradient-heavy anime content shows banding more readily than live-action
+// grain/texture does at the same nominal quality level. Also unvalidated
+// against real hardware/content yet.
+fn default_quality_anime() -> u32 {
+    24
+}
+
+fn default_anime_svtav1_preset() -> u32 {
+    10
+}
+
+fn default_anime_svtav1_max_threads() -> u32 {
+    4
+}
+
+fn default_min_size_reduction_pct() -> f64 {
+    0.10
+}
+
+fn default_skip_below_ceiling_ratio() -> f64 {
+    0.5
+}
+
+fn default_verify_sample_secs() -> f64 {
+    20.0
 }
 
 /// TVDB v4 API key, exchanged for a short-lived JWT at request time.
@@ -416,7 +579,39 @@ impl Config {
 
         let raw = fs::read_to_string(&path)?;
         let cfg: Config = toml::from_str(&raw)?;
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Rejects a handful of `transcode` values that are individually
+    /// syntactically valid TOML but make the transcode pipeline's math
+    /// nonsensical — there's no other validation anywhere in this config,
+    /// so a typo here would otherwise only surface much later, deep inside
+    /// an encode.
+    fn validate(&self) -> Result<()> {
+        // `target_bitrate_kbps` divides by `reference_height` (via
+        // `reference_pixels`); zero makes that ratio `f64::INFINITY`, which
+        // saturates to `u32::MAX` on the cast back to `u32` — then
+        // `run_ffmpeg_encode_live_action`'s `bitrate_ceiling_kbps * 3`
+        // overflows that `u32::MAX` (panics in a debug build, silently
+        // wraps to a nonsense small value in release).
+        anyhow::ensure!(
+            self.transcode.reference_height > 0,
+            "transcode.reference_height must be greater than 0"
+        );
+        // `is_beneficial` computes `original_bytes * (1.0 -
+        // min_size_reduction_pct)` as the max allowed output size — a
+        // negative value here would raise that ceiling *above* the
+        // original, letting a transcode that actually grew the file still
+        // count as "beneficial." That's the exact failure mode
+        // `min_size_reduction_pct` exists to prevent (see its own doc
+        // comment: a real incident where flat-bitrate VBR silently produced
+        // files larger than the original).
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.transcode.min_size_reduction_pct),
+            "transcode.min_size_reduction_pct must be between 0.0 and 1.0"
+        );
+        Ok(())
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -504,5 +699,38 @@ mod tests {
         let cfg: Config = toml::from_str("[daemon]\nlog_level = \"debug\"\n").unwrap();
         assert_eq!(cfg.daemon.log_level, "debug");
         assert_eq!(cfg.daemon.listen_addr, "127.0.0.1:7879");
+    }
+
+    #[test]
+    fn default_config_passes_validation() {
+        Config::default().validate().unwrap();
+    }
+
+    // Regression test for a real gap found in review: `reference_height =
+    // 0` makes `target_bitrate_kbps`'s resolution-scaling ratio divide by
+    // zero, which eventually overflows a `u32` multiplication deep inside
+    // the live-action encoder's maxrate calculation — a config typo that
+    // used to only surface as a panic/garbage value in the middle of an
+    // encode, not at startup.
+    #[test]
+    fn rejects_a_zero_reference_height() {
+        let cfg: Config = toml::from_str("[transcode]\nreference_height = 0\n").unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    // Regression test for a real gap found in review: a negative
+    // `min_size_reduction_pct` would let `is_beneficial` accept an encode
+    // that actually *grew* the file — the exact invariant this field exists
+    // to guarantee against.
+    #[test]
+    fn rejects_a_negative_min_size_reduction_pct() {
+        let cfg: Config = toml::from_str("[transcode]\nmin_size_reduction_pct = -0.1\n").unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_a_min_size_reduction_pct_above_one() {
+        let cfg: Config = toml::from_str("[transcode]\nmin_size_reduction_pct = 1.5\n").unwrap();
+        assert!(cfg.validate().is_err());
     }
 }
