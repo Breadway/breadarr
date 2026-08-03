@@ -448,6 +448,35 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
 
+    // Decided at enqueue time (path prefix match against
+    // `transcode.anime_root_folders`, OR'd with the `anime_mapping`/
+    // `anime_tmdb_movie` metadata check) and carried on the job row so
+    // `claim_pending_jobs` can dispatch straight to the right encode
+    // pipeline (`run_ffmpeg_encode_anime` vs `_live_action`) without
+    // re-deriving it — the eligibility metadata lookups aren't available
+    // from the job row's own columns alone (no media_item_id here).
+    add_column_if_missing(
+        conn,
+        "transcode_job",
+        "is_anime",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    // Lets a job re-encode a file that's already AV1 — normally
+    // `encode_and_verify` treats "already AV1" as nothing-to-do and skips
+    // the encode entirely, which is right for a fresh library scan but
+    // wrong for deliberately re-transcoding a file that got mis-encoded
+    // (e.g. the 476 files a real rate-control bug left *larger* than their
+    // original — already AV1, so the normal backfill query skips them, but
+    // they're exactly what a remediation pass needs to revisit). See
+    // `find_oversized_av1_candidates`.
+    add_column_if_missing(
+        conn,
+        "transcode_job",
+        "force_reencode",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
     Ok(())
 }
 

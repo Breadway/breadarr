@@ -118,8 +118,14 @@ async fn main() -> Result<()> {
         Some("transcode-library") => {
             return transcode_library_cmd(&config).await;
         }
+        Some("retranscode-oversized") => {
+            return retranscode_oversized_cmd(&config).await;
+        }
         Some("verify-library") => {
             return verify_library_cmd(&config).await;
+        }
+        Some("relink-orphaned-files") => {
+            return relink_orphaned_files_cmd(&config).await;
         }
         _ => {}
     }
@@ -1209,6 +1215,44 @@ async fn remux_backlog_cmd(config: &Config) -> Result<()> {
 /// doesn't stall the grab/import/search cycles; this command is for
 /// immediately backfilling that same backlog by hand instead of waiting for
 /// it to trickle in over several hours.
+/// One-time reconciliation for episodes whose `episode_file` association
+/// went missing (almost certainly the earlier DB-recovery incident) despite
+/// their real file still sitting exactly where breadarr's own importer
+/// would have put it — see `importer::find_relinkable_episode_files`'s doc
+/// comment for the full story. Purely additive: reports what it found
+/// before touching anything, never moves/deletes/overwrites a single file,
+/// and flags ambiguous matches for a human to look at rather than guessing.
+async fn relink_orphaned_files_cmd(config: &Config) -> Result<()> {
+    if let Some(parent) = config.db_path().parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(config.db_path())?;
+    db::init(&conn)?;
+
+    let (candidates, ambiguous) = importer::find_relinkable_episode_files(&conn)?;
+    println!(
+        "found {} orphaned episode file(s) to relink, {} ambiguous case(s) left for manual review",
+        candidates.len(),
+        ambiguous.len()
+    );
+    for c in &candidates {
+        println!(
+            "  relink: {} S{:02}E{:02} -> {}",
+            c.series_title,
+            c.season_number,
+            c.episode_number,
+            c.path.display()
+        );
+    }
+    for a in &ambiguous {
+        println!("  ambiguous, skipped: {a}");
+    }
+
+    let linked = importer::relink_episode_files(&conn, &candidates)?;
+    println!("done: {linked} episode(s) relinked");
+    Ok(())
+}
+
 async fn probe_library_cmd(config: &Config) -> Result<()> {
     if let Some(parent) = config.db_path().parent() {
         std::fs::create_dir_all(parent)?;
@@ -1270,9 +1314,56 @@ async fn transcode_library_cmd(config: &Config) -> Result<()> {
             candidate.episode_file_id,
             candidate.video_codec.as_deref(),
             candidate.size_bytes,
+            candidate.is_anime,
+            false,
         )?;
     }
 
+    drive_transcode_queue_to_completion(conn, config).await
+}
+
+/// Re-transcodes files a real rate-control bug left larger than their
+/// original (already AV1, so `transcode-library`'s own backfill query
+/// excludes them) — see `transcode::find_oversized_av1_candidates`'s doc
+/// comment for the full story. Enqueues with `force_reencode: true`, the
+/// only thing that lets `encode_and_verify` attempt a real re-encode of a
+/// file that's already AV1 rather than treating it as nothing-to-do.
+async fn retranscode_oversized_cmd(config: &Config) -> Result<()> {
+    if !config.transcode.enabled {
+        bail!("transcode.enabled is false in config — enable it before running this");
+    }
+    if let Some(parent) = config.db_path().parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(config.db_path())?;
+    db::init(&conn)?;
+
+    let candidates = transcode::find_oversized_av1_candidates(&conn, &config.transcode)?;
+    println!(
+        "found {} oversized AV1 file(s) to re-transcode, worst offenders first",
+        candidates.len()
+    );
+    for candidate in &candidates {
+        transcode::enqueue(
+            &conn,
+            candidate.episode_file_id,
+            candidate.video_codec.as_deref(),
+            candidate.size_bytes,
+            candidate.is_anime,
+            true,
+        )?;
+    }
+
+    drive_transcode_queue_to_completion(conn, config).await
+}
+
+/// Shared by `transcode_library_cmd` and `retranscode_oversized_cmd`: drains
+/// whatever's now `pending` in `transcode_job` via repeated `run_cycle`
+/// calls until nothing is left, printing a running total. The only
+/// difference between the two commands is which candidates got enqueued
+/// (and with what `force_reencode` value) before this runs — there's
+/// exactly one place that actually drives the worker loop to completion.
+async fn drive_transcode_queue_to_completion(conn: Connection, config: &Config) -> Result<()> {
     let jellyfin = if config.jellyfin.base_url.is_empty() {
         None
     } else {
@@ -1284,6 +1375,7 @@ async fn transcode_library_cmd(config: &Config) -> Result<()> {
 
     let conn = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
     let mut total_succeeded = 0usize;
+    let mut total_skipped = 0usize;
     let mut total_failed = 0usize;
     let mut total_bytes_saved: i64 = 0;
     loop {
@@ -1293,12 +1385,13 @@ async fn transcode_library_cmd(config: &Config) -> Result<()> {
             break;
         }
         total_succeeded += stats.succeeded;
+        total_skipped += stats.skipped;
         total_failed += stats.failed;
         total_bytes_saved += stats.bytes_saved;
         println!("batch: {stats:?}");
     }
     println!(
-        "done: {total_succeeded} succeeded, {total_failed} failed, {:.1} GB saved total",
+        "done: {total_succeeded} succeeded, {total_skipped} skipped (not beneficial), {total_failed} failed, {:.1} GB saved total",
         total_bytes_saved as f64 / 1_073_741_824.0
     );
     Ok(())

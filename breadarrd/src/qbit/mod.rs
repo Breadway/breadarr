@@ -226,10 +226,6 @@ impl QbitClient {
         unreachable!("loop always returns or bails on its second iteration")
     }
 
-    /// Moves a torrent's save location — qBittorrent physically relocates
-    /// the underlying file(s) itself and continues seeding from the new
-    /// path, rather than breadarr keeping a second permanent copy purely to
-    /// satisfy its own import step.
     /// Held for the duration of an add-then-correlate-hash sequence — see
     /// `grab_lock`'s doc comment on why this needs to be process-wide, not
     /// just per-call.
@@ -237,10 +233,19 @@ impl QbitClient {
         self.grab_lock.lock().await
     }
 
-    pub async fn set_location(&self, hash: &str, location: &str) -> Result<()> {
+    /// Removes a torrent from qBittorrent's own tracking after breadarr has
+    /// already moved its data straight into the library — `delete_files:
+    /// false` because by the time this is called there's nothing left at
+    /// the torrent's original save path for qBittorrent to delete; leaving
+    /// the torrent registered would just leave it sitting in an "files
+    /// missing" error state indefinitely. Best-effort from the caller's
+    /// side: a failure here never undoes or blocks the import that already
+    /// succeeded, it just leaves one stale entry in the qBittorrent UI to
+    /// clean up by hand.
+    pub async fn delete_torrent(&self, hash: &str) -> Result<()> {
         self.post_form(
-            "/api/v2/torrents/setLocation",
-            &[("hashes", hash), ("location", location)],
+            "/api/v2/torrents/delete",
+            &[("hashes", hash), ("deleteFiles", "false")],
         )
         .await?;
         Ok(())
