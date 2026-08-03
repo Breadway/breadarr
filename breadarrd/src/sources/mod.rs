@@ -45,7 +45,17 @@ pub(crate) fn urlencode(s: &str) -> String {
 
 pub(crate) fn parse_human_size(s: &str) -> Option<u64> {
     let s = s.trim();
-    let (num_part, unit) = s.split_once(' ')?;
+    // Split on the first character that isn't part of the number, rather
+    // than requiring a literal space — some sources render this without one
+    // ("38.1GiB"). Requiring a space made `split_once(' ')` return `None`
+    // for those, silently leaving `size_bytes` unset rather than failing
+    // outright: the gate's size sanity check (`gate.rs`) treats a missing
+    // size as "nothing to check" and skips it entirely instead of rejecting
+    // the release, so a value this parser simply couldn't read bypassed
+    // size validation altogether rather than being caught by it.
+    let split_at = s.find(|c: char| !(c.is_ascii_digit() || c == '.'))?;
+    let (num_part, unit) = s.split_at(split_at);
+    let unit = unit.trim();
     let num: f64 = num_part.parse().ok()?;
     let mult = match unit {
         "B" => 1.0,
@@ -79,5 +89,15 @@ mod tests {
     #[test]
     fn rejects_unknown_unit() {
         assert_eq!(parse_human_size("5 XiB"), None);
+    }
+
+    // Regression test for a real gap found in review: some sources render
+    // this with no space between the number and the unit — the old
+    // `split_once(' ')` returned `None` for those, silently leaving
+    // `size_bytes` unset (which skips the gate's size sanity check entirely)
+    // rather than rejecting a value this parser genuinely couldn't read.
+    #[test]
+    fn parses_a_size_with_no_space_before_the_unit() {
+        assert_eq!(parse_human_size("38.1GiB"), Some(40909563494));
     }
 }

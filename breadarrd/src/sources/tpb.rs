@@ -4,6 +4,17 @@ use serde::Deserialize;
 
 use super::{urlencode, RawReleaseItem, ReleaseSource};
 
+/// A valid BitTorrent v1 info_hash: 40 hex chars or 32 base32 chars — same
+/// shape `qbit::extract_btih` accepts out of a magnet URI. Checked before
+/// building a magnet from `info_hash` at all: apibay is normally reliable,
+/// but a malformed value would otherwise silently produce a magnet
+/// `extract_btih` can't parse back out, downgrading that grab to the slow
+/// ~30s `torrents/info` polling path with no visible error anywhere.
+fn is_valid_info_hash(hash: &str) -> bool {
+    (hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        || (hash.len() == 32 && hash.bytes().all(|b| matches!(b, b'2'..=b'7' | b'a'..=b'z' | b'A'..=b'Z')))
+}
+
 /// A community-run JSON API mirror of The Pirate Bay's search — unlike
 /// 1337x, this is a genuine machine-readable API (not HTML scraping), and
 /// unlike 1337x's HTML results table, `info_hash` is enough to build a
@@ -85,8 +96,15 @@ impl ReleaseSource for TpbSource {
             // A query with no matches returns a single sentinel row
             // (id="0", an all-zero info_hash) rather than an empty array —
             // has to be filtered out explicitly or it'd be treated as one
-            // real (and completely bogus) result.
-            .filter(|r| r.id != "0" && !r.info_hash.chars().all(|c| c == '0'))
+            // real (and completely bogus) result. The all-zero hash is
+            // itself 40 valid hex characters, so `is_valid_info_hash` alone
+            // wouldn't catch it — both checks are needed, not one replacing
+            // the other.
+            .filter(|r| {
+                r.id != "0"
+                    && !r.info_hash.chars().all(|c| c == '0')
+                    && is_valid_info_hash(&r.info_hash)
+            })
             .map(|r| RawReleaseItem {
                 title: r.name.clone(),
                 link: build_magnet(&r.info_hash, &r.name),
@@ -125,8 +143,31 @@ mod tests {
         let results: Vec<TpbResult> = serde_json::from_str(body).unwrap();
         let filtered: Vec<_> = results
             .into_iter()
-            .filter(|r| r.id != "0" && !r.info_hash.chars().all(|c| c == '0'))
+            .filter(|r| {
+                r.id != "0"
+                    && !r.info_hash.chars().all(|c| c == '0')
+                    && is_valid_info_hash(&r.info_hash)
+            })
             .collect();
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn is_valid_info_hash_accepts_both_real_shapes() {
+        assert!(is_valid_info_hash("8F87C7C186172F17E35F4512BB1A3E93B614ADED")); // 40 hex
+        assert!(is_valid_info_hash("abcdefghijklmnopqrstuvwxyz234567")); // 32 base32
+    }
+
+    // Regression test for a real gap found in review: a malformed
+    // `info_hash` from apibay used to flow straight into `build_magnet`
+    // with no validation, silently producing a magnet `qbit::extract_btih`
+    // can't parse back out — downgrading that grab to the slow polling path
+    // with no error surfaced anywhere.
+    #[test]
+    fn is_valid_info_hash_rejects_malformed_values() {
+        assert!(!is_valid_info_hash(""));
+        assert!(!is_valid_info_hash("too-short"));
+        assert!(!is_valid_info_hash("not-a-hex-string-at-all-nope!!!!!!!!!!!!")); // 40 chars, non-hex
+        assert!(!is_valid_info_hash("8F87C7C186172F17E35F4512BB1A3E93B614ADE")); // 39 hex chars
     }
 }

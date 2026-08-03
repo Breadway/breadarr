@@ -109,11 +109,25 @@ async fn require_api_token(State(state): State<AppState>, req: Request, next: Ne
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|token| token == state.config.daemon.api_token);
+        .is_some_and(|token| constant_time_eq(token, &state.config.daemon.api_token));
     if !authorized {
         return (StatusCode::UNAUTHORIZED, "missing or invalid API token").into_response();
     }
     next.run(req).await
+}
+
+/// Byte-wise `==` short-circuits on the first mismatching byte, making
+/// comparison time a (weak, but real) signal of how many leading bytes of a
+/// guessed token were correct — a classic timing oracle. This always
+/// touches every byte of the shorter input regardless of where they first
+/// differ. Real-world exposure here is low (loopback-bound by default, a
+/// personal single-user daemon), but it costs nothing to close.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 pub fn router(state: AppState) -> Router {
@@ -178,4 +192,29 @@ pub fn router(state: AppState) -> Router {
             require_api_token,
         ))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_time_eq_matches_identical_strings() {
+        assert!(constant_time_eq("secret-token", "secret-token"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different_strings_of_the_same_length() {
+        assert!(!constant_time_eq("secret-token", "secret-toke1"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different_lengths() {
+        assert!(!constant_time_eq("short", "a-much-longer-token"));
+    }
+
+    #[test]
+    fn constant_time_eq_treats_empty_strings_as_equal() {
+        assert!(constant_time_eq("", ""));
+    }
 }

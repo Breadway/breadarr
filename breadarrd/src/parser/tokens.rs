@@ -90,15 +90,46 @@ static SXX_EPISODE_RANGE_RE: LazyLock<Regex> =
 // elsewhere in the title with a smaller trailing number.
 static BARE_EPISODE_RANGE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(\d{1,3})\s*[-~]\s*(\d{1,3})\b").unwrap());
+// A `YYYY-MM-DD` date ("2024-01-15"): the year's 4 digits are too many for
+// `BARE_EPISODE_RANGE_RE`'s/`DASH_EPISODE_RE`'s `\d{1,3}` to match as a
+// whole, so those regexes' *first real match* on a date-named release ends
+// up starting at the month ("01-15", or "01" alone) instead — a bare
+// month/day pair, not a real episode range or episode number. Matched as a
+// whole date span (not just a "year-" prefix check) so both the month *and*
+// the day segment are covered — checking only the text immediately before a
+// candidate match would still let "15" in "2024-01-15" slip through as a
+// false "episode 15" once "01" alone was correctly rejected.
+static DATE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:19|20)\d{2}-\d{1,2}-\d{1,2}\b").unwrap());
+
+fn overlaps_a_date(s: &str, start: usize, end: usize) -> bool {
+    DATE_RE.find_iter(s).any(|d| d.start() <= start && end <= d.end())
+}
 
 pub(super) fn looks_like_episode_range(s: &str) -> bool {
     if BATCH_WORD_RE.is_match(s) || SXX_EPISODE_RANGE_RE.is_match(s) {
         return true;
     }
-    BARE_EPISODE_RANGE_RE.captures(s).is_some_and(|c| {
-        let a: u32 = c[1].parse().unwrap_or(0);
-        let b: u32 = c[2].parse().unwrap_or(0);
-        b > a
+    BARE_EPISODE_RANGE_RE.captures_iter(s).any(|c| {
+        let first = c.get(1).unwrap();
+        let second = c.get(2).unwrap();
+        let a: u32 = first.as_str().parse().unwrap_or(0);
+        let b: u32 = second.as_str().parse().unwrap_or(0);
+        if b <= a {
+            return false;
+        }
+        if overlaps_a_date(s, first.start(), second.end()) {
+            return false;
+        }
+        // "Season 2 - 25": the range's first number is really a season
+        // marker's own number (checked by comparing spans, not just text,
+        // so this only fires when the two genuinely overlap), not a range
+        // start — "2 - 25" isn't a real episode range, it's "season 2,
+        // episode 25", resolved separately in `extract_episode_info`.
+        let is_season_marker_number = SEASON_PACK_RE.captures(s).is_some_and(|sc| {
+            sc.get(1).unwrap().range() == first.range()
+        });
+        !is_season_marker_number
     })
 }
 
@@ -165,6 +196,23 @@ pub(super) fn extract_year(s: &str) -> Option<u32> {
     s[m.start()..m.end()].parse().ok()
 }
 
+/// `DASH_EPISODE_RE`'s first match that isn't actually the month of a
+/// `YYYY-MM-DD` date. A bare `-\s*\d{1,3}\b` alone can't tell "Show - 25
+/// [1080p]" (a real episode number) apart from "...2024-01-15..." (the "01"
+/// is just a month, matched for the same reason `BARE_EPISODE_RANGE_RE`
+/// does in `looks_like_episode_range` — the 4-digit year is too many digits
+/// to match as a whole, so the regex's first real match starts one segment
+/// later). Reused by every `extract_episode_info` branch that falls back to
+/// `DASH_EPISODE_RE`, not just the range-detection path, since the date
+/// misread happens independently of whether `looks_like_episode_range`
+/// fires.
+fn find_real_dash_episode(s: &str) -> Option<regex::Captures<'_>> {
+    DASH_EPISODE_RE.captures_iter(s).find(|c| {
+        let m = c.get(0).unwrap();
+        !overlaps_a_date(s, m.start(), m.end())
+    })
+}
+
 /// Returns (season, episode, absolute_episode, title_span_end) — the last
 /// element is the byte offset in `s` where the episode/season token (or,
 /// failing that, the first quality marker) begins, used to slice out the
@@ -194,9 +242,19 @@ pub(super) fn extract_episode_info(s: &str) -> (Option<u32>, Option<u32>, Option
     }
     if let Some(c) = SEASON_PACK_RE.captures(s) {
         let season = c[1].parse().ok();
+        // A season marker immediately followed elsewhere by a dash-number
+        // ("Season 2 - 25") names one episode within that season, not a
+        // season-only pack — checked here rather than reordering the checks
+        // above `SXX_DASH_EP_RE`/`SXXEXX_RE` still get first crack at more
+        // specific shapes, and a genuine season-only pack (no trailing
+        // dash-number anywhere) is unaffected.
+        if let Some(ep) = find_real_dash_episode(s) {
+            let episode: Option<u32> = ep[1].parse().ok();
+            return (season, episode, None, c.get(0).unwrap().start());
+        }
         return (season, None, None, c.get(0).unwrap().start());
     }
-    if let Some(c) = DASH_EPISODE_RE.captures(s) {
+    if let Some(c) = find_real_dash_episode(s) {
         let episode: Option<u32> = c[1].parse().ok();
         return (None, episode, episode, c.get(0).unwrap().start());
     }

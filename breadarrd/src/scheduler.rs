@@ -2112,6 +2112,30 @@ pub fn prepare_review_approval(conn: &Connection, review_id: i64) -> Result<Appr
     let profile = load_quality_profile(conn, media_item.quality_profile_id, profile_kind)?;
     let score = scoring::score(&parsed, 0, false, &profile);
 
+    // Claimed atomically here, still under the caller's DB lock — a real
+    // TOCTOU otherwise: the caller only checked `status == "pending"` above
+    // (a plain read, not a claim), then drops the lock and does the actual
+    // grab (~30s of network/qBittorrent I/O) before `finalize_review_approval`
+    // ever writes anything. A double-click, or an HTTP client retrying after
+    // an apparent timeout, lands two concurrent `approve()` calls that both
+    // pass the read above, both grab the same release, and both write their
+    // own `release`/`torrent_fetch` rows for it. Marking `approved` here
+    // rather than waiting for `finalize_review_approval` closes that window;
+    // `approved` at this point means "no longer available for a second
+    // approval attempt," not "successfully grabbed" — same distinction
+    // `release.status` already draws between `grabbed` and `failed`, and if
+    // the grab itself then errors outright, `release_review_claim` reverts
+    // this back to `pending` (see its own doc comment).
+    let claimed = conn.execute(
+        "UPDATE review_queue SET status = 'approved' WHERE id = ?1 AND status = 'pending'",
+        params![review_id],
+    )?;
+    if claimed == 0 {
+        // Lost the race to a concurrent approve() between the read above
+        // and this claim.
+        return Ok(ApprovalPrep::NotPending);
+    }
+
     Ok(ApprovalPrep::Ready(PreparedApproval {
         media_item_id: media_item.id,
         episode_id,
@@ -2121,6 +2145,30 @@ pub fn prepare_review_approval(conn: &Connection, review_id: i64) -> Result<Appr
         link,
         score,
     }))
+}
+
+/// Releases a claim `prepare_review_approval` took when the grab itself
+/// then fails outright (a network/qBittorrent error — `Err` from
+/// `grab_prepared_approval`, not just a missing hash on an otherwise-ok add;
+/// see `finalize_review_approval`'s own handling for that case, which still
+/// runs to completion and records a `failed` release). Without this, an
+/// approval claimed just before a transient qBittorrent outage would be
+/// stuck `approved` forever with no `release`/`torrent_fetch` row to show
+/// for it — worse than the un-atomic version this replaced, which at least
+/// left the row `pending` and retryable. Guarded on `WHERE status =
+/// 'approved'` mainly to no-op if the row somehow moved on already (e.g. a
+/// racing `reject`), not because `approved` distinguishes "merely claimed"
+/// from "successfully finalized" — it doesn't, `review_queue.status` has no
+/// separate state for that. Safe in practice because a single request's
+/// grab either errors (this runs, nothing was ever finalized) or succeeds
+/// (`finalize_review_approval` runs instead, this never gets called) — the
+/// two are mutually exclusive within one `approve()` call.
+pub fn release_review_claim(conn: &Connection, review_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE review_queue SET status = 'pending' WHERE id = ?1 AND status = 'approved'",
+        params![review_id],
+    )?;
+    Ok(())
 }
 
 /// The actual grab — network/qBittorrent I/O only, no `Connection` involved,
@@ -2133,11 +2181,12 @@ pub async fn grab_prepared_approval(
     grab_and_capture_hash(qbit, &prepared.link, qbit_category).await
 }
 
-/// Sync-only: records the grab and marks the review approved. Call after
-/// [`grab_prepared_approval`] completes.
+/// Sync-only: records the grab. Call after [`grab_prepared_approval`]
+/// completes. Doesn't touch `review_queue.status` — `prepare_review_approval`
+/// already claimed it into `approved` before the grab ran (see its doc
+/// comment).
 pub fn finalize_review_approval(
     conn: &Connection,
-    review_id: i64,
     prepared: &PreparedApproval,
     qbit_category: &str,
     torrent_hash: Option<&str>,
@@ -2167,10 +2216,6 @@ pub fn finalize_review_approval(
         qbit_category,
         torrent_hash,
         status,
-    )?;
-    conn.execute(
-        "UPDATE review_queue SET status = 'approved' WHERE id = ?1",
-        params![review_id],
     )?;
     Ok(())
 }
@@ -2543,6 +2588,47 @@ mod tests {
             }
             _ => panic!("expected ApprovalPrep::Ready for a monitored, file-less movie"),
         }
+    }
+
+    // Regression test for a real gap found in review: `prepare_review_approval`
+    // used to only *read* `status == "pending"`, never claim it — two
+    // concurrent `approve()` calls (a double-click, or an HTTP client retry)
+    // could both pass that check, both grab the same release, and both
+    // write their own `release`/`torrent_fetch` rows. A second call for the
+    // same review must now see it's already claimed.
+    #[test]
+    fn a_second_prepare_call_on_an_already_claimed_review_sees_not_pending() {
+        let conn = seeded_movie_conn();
+        let review_id = insert_pending_review(&conn, "Some Movie 2016 1080p BluRay x264");
+
+        assert!(matches!(
+            prepare_review_approval(&conn, review_id).unwrap(),
+            ApprovalPrep::Ready(_)
+        ));
+        // Same review_id, called again before any grab or finalize ran —
+        // simulates the double-click/retry race.
+        assert!(matches!(
+            prepare_review_approval(&conn, review_id).unwrap(),
+            ApprovalPrep::NotPending
+        ));
+    }
+
+    #[test]
+    fn release_review_claim_reverts_a_claimed_row_back_to_pending() {
+        let conn = seeded_movie_conn();
+        let review_id = insert_pending_review(&conn, "Some Movie 2016 1080p BluRay x264");
+
+        assert!(matches!(
+            prepare_review_approval(&conn, review_id).unwrap(),
+            ApprovalPrep::Ready(_)
+        ));
+        release_review_claim(&conn, review_id).unwrap();
+        // The claim was released (e.g. because the grab itself then errored
+        // outright) — a fresh approval attempt must be possible again.
+        assert!(matches!(
+            prepare_review_approval(&conn, review_id).unwrap(),
+            ApprovalPrep::Ready(_)
+        ));
     }
 
     #[test]

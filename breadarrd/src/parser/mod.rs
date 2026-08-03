@@ -209,6 +209,50 @@ mod tests {
         );
     }
 
+    // Regression test for a real gap found in review: "Season 2 - 25" was
+    // first swallowed whole by `looks_like_episode_range` (its own
+    // `BARE_EPISODE_RANGE_RE` skips over the un-matchable "Season" word and
+    // finds its first real match at "2 - 25", mistaking the season marker's
+    // own number for a range start), and even with that fixed,
+    // `extract_episode_info`'s `SEASON_PACK_RE` branch used to return
+    // season-only and never look for a trailing episode number at all.
+    // Either bug alone drops episode 25 silently.
+    #[test]
+    fn parses_a_season_marker_followed_by_a_dash_episode() {
+        let p = parse("[Erai-raws] Some Show Season 2 - 25 [1080p]");
+        assert_eq!(p.season, Some(2));
+        assert_eq!(p.episode, Some(25));
+    }
+
+    // Companion case: a genuine season-only pack (no trailing dash-episode
+    // anywhere) must still resolve to season-only, not spuriously pick up
+    // an unrelated number as an episode.
+    #[test]
+    fn a_genuine_season_only_pack_with_no_dash_episode_still_has_no_episode() {
+        let p = parse("Some Show Season 2 Complete [1080p]");
+        assert_eq!(p.season, Some(2));
+        assert_eq!(p.episode, None);
+    }
+
+    // Regression test for a real gap found in review: a date-named release
+    // ("2024-01-15") got misread by `BARE_EPISODE_RANGE_RE` as an episode
+    // range — the 4-digit year is too many digits for `\d{1,3}` to match
+    // whole, so its first real match starts at the month/day pair
+    // ("01-15") instead, and `looks_like_episode_range` treats that as a
+    // real range. Asserted directly against the tokenizer rather than
+    // `parse()`, since a false-positive range and a genuine "no episode
+    // marker at all" both surface identically as `None`/`None` on
+    // `ParsedRelease` — `looks_like_episode_range` returning `false` is the
+    // actual fix being tested here.
+    #[test]
+    fn does_not_mistake_a_yyyy_mm_dd_date_for_an_episode_range() {
+        assert!(!tokens::looks_like_episode_range("Some Daily Show 2024-01-15 1080p WEB-DL"));
+
+        let p = parse("Some Daily Show 2024-01-15 1080p WEB-DL");
+        assert_eq!(p.season, None);
+        assert_eq!(p.episode, None);
+    }
+
     #[test]
     fn parses_yameii_dash_sxxexx_with_english_dub_tag() {
         let p = parse("[Yameii] Ascendance of a Bookworm - S04E11 [English Dub] [CR WEB-DL 1080p H264 AAC] [8ACE7B72] (Honzuki no Gekokujou)");

@@ -52,6 +52,39 @@ fn build_search_url(feed_url: &str, query: Option<&str>) -> String {
     }
 }
 
+/// Every field accumulated across one `<item>`'s `Text`/`CData` events,
+/// bundled into one struct (rather than six separate `&mut Option<_>`
+/// parameters) purely to keep `accumulate_field` under clippy's
+/// too-many-arguments threshold.
+#[derive(Default)]
+struct ItemFields {
+    title: Option<String>,
+    link: Option<String>,
+    guid: Option<String>,
+    seeders: Option<u32>,
+    leechers: Option<u32>,
+    size_bytes: Option<u64>,
+}
+
+/// Appends rather than overwrites title/link/guid: a real feed can split a
+/// single logical value across more than one `Text`/`CData` event for the
+/// same tag (mixed content, or just a parser buffer boundary) — a plain
+/// assignment would silently keep only the *last* fragment, truncating the
+/// value. `nyaa:seeders`/`nyaa:leechers`/`nyaa:size` stay parse-and-overwrite
+/// since they're short numeric/size tokens, not free text expected to span
+/// multiple events.
+fn accumulate_field(tag: &str, text: &str, fields: &mut ItemFields) {
+    match tag {
+        "title" => fields.title.get_or_insert_with(String::new).push_str(text),
+        "link" => fields.link.get_or_insert_with(String::new).push_str(text),
+        "guid" => fields.guid.get_or_insert_with(String::new).push_str(text),
+        "nyaa:seeders" => fields.seeders = text.parse().ok(),
+        "nyaa:leechers" => fields.leechers = text.parse().ok(),
+        "nyaa:size" => fields.size_bytes = parse_human_size(text),
+        _ => {}
+    }
+}
+
 fn parse_nyaa_rss(bytes: &[u8]) -> Result<Vec<RawReleaseItem>> {
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(true);
@@ -61,12 +94,7 @@ fn parse_nyaa_rss(bytes: &[u8]) -> Result<Vec<RawReleaseItem>> {
 
     let mut in_item = false;
     let mut cur_tag = String::new();
-    let mut title = None;
-    let mut link = None;
-    let mut guid = None;
-    let mut seeders = None;
-    let mut leechers = None;
-    let mut size_bytes = None;
+    let mut fields = ItemFields::default();
 
     loop {
         match reader.read_event_into(&mut buf)? {
@@ -75,41 +103,42 @@ fn parse_nyaa_rss(bytes: &[u8]) -> Result<Vec<RawReleaseItem>> {
                 let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                 if name == "item" {
                     in_item = true;
-                    title = None;
-                    link = None;
-                    guid = None;
-                    seeders = None;
-                    leechers = None;
-                    size_bytes = None;
+                    fields = ItemFields::default();
                 }
                 cur_tag = name;
             }
             Event::Text(t) if in_item => {
                 let raw = t.decode()?;
                 let text = unescape(&raw)?.into_owned();
-                match cur_tag.as_str() {
-                    "title" => title = Some(text),
-                    "link" => link = Some(text),
-                    "guid" => guid = Some(text),
-                    "nyaa:seeders" => seeders = text.parse().ok(),
-                    "nyaa:leechers" => leechers = text.parse().ok(),
-                    "nyaa:size" => size_bytes = parse_human_size(&text),
-                    _ => {}
-                }
+                accumulate_field(&cur_tag, &text, &mut fields);
+            }
+            // CDATA content is raw text by definition — XML entity escaping
+            // doesn't apply inside a CDATA section (running `unescape()` on
+            // it would misinterpret a literal "&amp;" as an escaped
+            // ampersand), so this decodes without it. Many real-world feeds
+            // wrap `<title>`/`<link>` in CDATA; previously only
+            // `Event::Text` was handled at all, so those items silently
+            // came back with `title = None` and were dropped at the
+            // `item`-close check below with zero error — pointing
+            // `nyaa_rss_url` at a CDATA-heavy feed yielded zero items, not
+            // a visible failure.
+            Event::CData(t) if in_item => {
+                let text = t.decode()?.into_owned();
+                accumulate_field(&cur_tag, &text, &mut fields);
             }
             Event::End(e) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                 if name == "item" {
                     if let (Some(title), Some(link), Some(guid)) =
-                        (title.take(), link.take(), guid.take())
+                        (fields.title.take(), fields.link.take(), fields.guid.take())
                     {
                         items.push(RawReleaseItem {
                             title,
                             link,
                             guid,
-                            size_bytes,
-                            seeders,
-                            leechers,
+                            size_bytes: fields.size_bytes,
+                            seeders: fields.seeders,
+                            leechers: fields.leechers,
                         });
                     }
                     in_item = false;
@@ -154,6 +183,40 @@ mod tests {
         assert_eq!(item.seeders, Some(12));
         assert_eq!(item.leechers, Some(3));
         assert_eq!(item.size_bytes, Some(373817344));
+    }
+
+    // Regression test for a real gap found in review: many real-world feeds
+    // wrap `<title>`/`<link>`/`<guid>` in CDATA rather than plain text
+    // content (often to avoid having to XML-escape ampersands/brackets
+    // common in release titles). Previously only `Event::Text` was
+    // handled — `Event::CData` was silently ignored — so every field
+    // wrapped this way came back `None` and the whole item was dropped at
+    // the `item`-close check with no error surfaced at all.
+    #[test]
+    fn parses_cdata_wrapped_fields() {
+        const CDATA_SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa" version="2.0">
+<channel>
+<item>
+    <title><![CDATA[[Group] Some Show & Friends - 05 [1080p]]]></title>
+    <link><![CDATA[https://nyaa.si/download/2130903.torrent]]></link>
+    <guid isPermaLink="true"><![CDATA[https://nyaa.si/view/2130903]]></guid>
+    <nyaa:seeders>12</nyaa:seeders>
+    <nyaa:leechers>3</nyaa:leechers>
+    <nyaa:size>356.5 MiB</nyaa:size>
+</item>
+</channel>
+</rss>"#;
+
+        let items = parse_nyaa_rss(CDATA_SAMPLE.as_bytes()).unwrap();
+        assert_eq!(items.len(), 1, "a CDATA-wrapped item must not be silently dropped");
+        let item = &items[0];
+        // A literal "&" survives verbatim — CDATA content isn't
+        // XML-entity-escaped, so this must NOT come back as "&amp;".
+        assert_eq!(item.title, "[Group] Some Show & Friends - 05 [1080p]");
+        assert_eq!(item.link, "https://nyaa.si/download/2130903.torrent");
+        assert_eq!(item.guid, "https://nyaa.si/view/2130903");
+        assert_eq!(item.seeders, Some(12));
     }
 
     #[test]

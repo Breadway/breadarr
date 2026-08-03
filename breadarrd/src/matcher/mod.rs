@@ -96,6 +96,17 @@ impl TitleMatcher {
         })
     }
 
+    /// Caches by text — appropriate for candidate-side text only (library
+    /// `media_item` titles/aliases, or a metadata provider's small,
+    /// bounded result list), which the same daemon process legitimately
+    /// re-embeds across many calls. Deliberately never used for the query
+    /// side (see `embed_query`): `TitleMatcher` lives for the whole life of
+    /// `background_loop`, which never returns, and the query is a
+    /// freshly-parsed release title from every RSS item and search result
+    /// the daemon ever sees — almost never repeated verbatim. Caching those
+    /// too grew this `HashMap` without bound for the process's entire
+    /// (months-long) lifetime, a slow but real leak on a box also running
+    /// several GB of concurrent GPU/CPU transcode work.
     fn embed_cached(&mut self, text: &str) -> Result<Vec<f32>> {
         if let Some(v) = self.cache.get(text) {
             return Ok(v.clone());
@@ -103,6 +114,12 @@ impl TitleMatcher {
         let v = self.embedder.embed(text)?;
         self.cache.insert(text.to_string(), v.clone());
         Ok(v)
+    }
+
+    /// The query-side counterpart to `embed_cached` — same embedding, never
+    /// stored in `self.cache`. See `embed_cached`'s doc comment for why.
+    fn embed_query(&mut self, text: &str) -> Result<Vec<f32>> {
+        self.embedder.embed(text)
     }
 
     /// Given a flat list of candidate texts (e.g. every search result's
@@ -121,7 +138,7 @@ impl TitleMatcher {
         query: &str,
         candidates: &[(usize, String)],
     ) -> Result<Option<(usize, f32)>> {
-        let query_emb = self.embed_cached(query)?;
+        let query_emb = self.embed_query(query)?;
         let mut best: Option<(usize, f32)> = None;
         for (owner_index, text) in candidates {
             let emb = self.embed_cached(text)?;
@@ -137,7 +154,7 @@ impl TitleMatcher {
     /// aliases, returning the single best match and whether it clears the
     /// auto-match bar or needs a human to confirm it in the review queue.
     pub fn match_title(&mut self, conn: &Connection, query: &str) -> Result<MatchOutcome> {
-        let query_emb = self.embed_cached(query)?;
+        let query_emb = self.embed_query(query)?;
 
         let mut stmt = conn.prepare(
             "SELECT id, title FROM media_item WHERE monitored = 1
