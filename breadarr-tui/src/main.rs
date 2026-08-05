@@ -14,14 +14,17 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{App, Focus, StuckSection, Tab};
+use app::{App, Focus, LibraryRoots, StuckSection, Tab};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::load()?;
     let base_url = format!("http://{}", config.daemon.listen_addr);
     let client = DaemonClient::new(base_url, &config.daemon.api_token);
-    let root_folder = config.default_root_folder().to_string_lossy().to_string();
+    let roots = LibraryRoots {
+        series: config.default_root_folder().to_string_lossy().to_string(),
+        movies: config.movies_root_folder().to_string_lossy().to_string(),
+    };
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -30,7 +33,7 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(client);
-    let result = run(&mut terminal, &mut app, &root_folder).await;
+    let result = run(&mut terminal, &mut app, &roots).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -42,7 +45,7 @@ async fn main() -> Result<()> {
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    root_folder: &str,
+    roots: &LibraryRoots,
 ) -> Result<()> {
     let mut last_refresh = tokio::time::Instant::now() - Duration::from_secs(10);
 
@@ -60,7 +63,7 @@ async fn run(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                handle_key(app, key.code, root_folder).await;
+                handle_key(app, key.code, roots).await;
                 if app.should_quit {
                     return Ok(());
                 }
@@ -69,7 +72,7 @@ async fn run(
     }
 }
 
-async fn handle_key(app: &mut App, code: KeyCode, root_folder: &str) {
+async fn handle_key(app: &mut App, code: KeyCode, roots: &LibraryRoots) {
     // Typing into the add-show search box takes priority over global keys.
     if matches!(app.tab, Tab::Add) && matches!(app.focus, Focus::AddSearchInput) {
         match code {
@@ -140,7 +143,7 @@ async fn handle_key(app: &mut App, code: KeyCode, root_folder: &str) {
             }
             Tab::Library => app.open_detail().await,
             Tab::Add => match app.focus {
-                Focus::AddResults => app.add_selected_search_result(root_folder).await,
+                Focus::AddResults => app.add_selected_search_result(roots).await,
                 _ => app.focus = Focus::AddSearchInput,
             },
             Tab::Profiles if app.profile_detail.is_some() => {

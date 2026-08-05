@@ -27,17 +27,29 @@ pub struct Config {
     pub transcode: TranscodeConfig,
 }
 
-/// Where the TUI's "add show" flow places new series by default. Sonarr/
-/// Radarr let you pick a root folder per add; a single configured default
-/// is a reasonable v1 simplification — per-add picking can follow later.
+/// Where the TUI's "add" flow places new series/movies by default. Sonarr/
+/// Radarr let you pick a root folder per add; a single configured default per
+/// kind is a reasonable v1 simplification — per-add picking can follow later.
+/// Series and movies need *separate* defaults (not one shared value) because
+/// they live under different category roots on disk (e.g. `TV Shows/` vs
+/// `Movies/`) — a real production bug had both kinds falling back to one
+/// bare library root with no per-item subfolder, landing new grabs directly
+/// in the library root instead of inside their own show/movie folder,
+/// invisible to Jellyfin's per-category libraries.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct LibraryConfig {
     #[serde(default = "default_root_folder")]
     pub default_root_folder: String,
+    #[serde(default = "default_movies_root_folder")]
+    pub movies_root_folder: String,
 }
 
 fn default_root_folder() -> String {
     "~/breadarr-library".to_string()
+}
+
+fn default_movies_root_folder() -> String {
+    "~/breadarr-library/Movies".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -624,6 +636,10 @@ impl Config {
 
     pub fn default_root_folder(&self) -> PathBuf {
         expand_home(&self.library.default_root_folder)
+    }
+
+    pub fn movies_root_folder(&self) -> PathBuf {
+        expand_home(&self.library.movies_root_folder)
     }
 }
 

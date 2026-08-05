@@ -6,6 +6,39 @@ use breadarr_shared::dto::{
 };
 use breadarr_shared::DaemonClient;
 use ratatui::widgets::ListState;
+use std::path::Path;
+
+/// Category roots the TUI's "Add" flow can place new items under — kept as
+/// two separate paths (not one shared default) since a series and a movie
+/// added with the same title must not collide on disk, and Jellyfin's
+/// per-category libraries only see files under their own category root.
+pub struct LibraryRoots {
+    pub series: String,
+    pub movies: String,
+}
+
+/// Builds the per-item folder a freshly added series/movie lands in —
+/// `{root}/{Title} ({Year})`, matching the convention the importer already
+/// assumes (`import_one` places a movie's file directly inside its
+/// `media_item.root_folder`, with no further subfolder of its own, and
+/// `season_dir` does the same for a show's `Season NN` folders). Passing the
+/// bare category root straight through as `root_folder` — the bug this
+/// replaces — landed every new grab directly in that shared root instead of
+/// its own show/movie folder.
+fn item_root_folder(root: &str, title: &str, year: Option<i64>) -> String {
+    let sanitized: String = title
+        .chars()
+        .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .collect();
+    let folder_name = match year {
+        Some(y) => format!("{sanitized} ({y})"),
+        None => sanitized,
+    };
+    Path::new(root)
+        .join(folder_name)
+        .to_string_lossy()
+        .to_string()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -659,7 +692,7 @@ impl App {
         self.focus = Focus::AddResults;
     }
 
-    pub async fn add_selected_search_result(&mut self, root_folder: &str) {
+    pub async fn add_selected_search_result(&mut self, roots: &LibraryRoots) {
         let Some(idx) = self.add_results_state.selected() else {
             return;
         };
@@ -673,7 +706,7 @@ impl App {
                     title: result.title.clone(),
                     year: result.year,
                     aliases: Vec::new(),
-                    root_folder: root_folder.to_string(),
+                    root_folder: item_root_folder(&roots.series, &result.title, result.year),
                 };
                 self.client.add_series(&req).await.map(|r| r.media_item_id)
             }
@@ -682,7 +715,7 @@ impl App {
                     tmdb_id: result.external_id.clone(),
                     title: result.title.clone(),
                     year: result.year,
-                    root_folder: root_folder.to_string(),
+                    root_folder: item_root_folder(&roots.movies, &result.title, result.year),
                 };
                 self.client.add_movie(&req).await.map(|r| r.media_item_id)
             }
