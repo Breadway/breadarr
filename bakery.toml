@@ -1,0 +1,44 @@
+name = "breadarr"
+description = "Single-daemon Sonarr+Radarr+Prowlarr replacement — release watching, matching, grabbing, importing, and a terminal UI, no web UI"
+binaries = ["breadarrd", "breadarr-tui"]
+# mkvtoolnix-cli / ffmpeg: `mkvmerge` and `ffprobe`/`ffmpeg` are shelled out
+# to directly via Command::new() (breadarrd/src/importer/mkv.rs for the
+# audio-track remux fix; breadarrd/src/importer/ffprobe.rs and
+# breadarrd/src/transcode/mod.rs for media probing/corruption verification/
+# transcode-backlog work) rather than linked, so neither shows up in
+# `ldd target/release/breadarrd` -- confirmed by grepping breadarrd/src for
+# Command::new("mkvmerge"|"ffprobe"|"ffmpeg") and cross-checking against the
+# README's own host-requirements instructions. The ONNX embedding model (the
+# `ort` crate, used for fuzzy title matching) needs no system_deps entry:
+# `ldd target/release/breadarrd` lists no libonnxruntime.so, and `strings`
+# on the built binary is full of onnxruntime's own C++ symbol names --
+# confirming the `ort` crate's default strategy statically bundled its own
+# onnxruntime build directly into breadarrd rather than dynamically linking
+# the system onnxruntime-cpu package. openssl: libssl.so.3/libcrypto.so.3
+# (reqwest's TLS backend) show up directly in `ldd` for both breadarrd and
+# breadarr-tui. libstdc++/libgcc/glibc/zlib/zstd/brotli also appear in
+# `ldd` but are omitted here the same way breadcast's bakery.toml omits
+# them: glibc/gcc-libs are unavoidable base-system dependencies, and
+# zlib/zstd/brotli are themselves transitive deps of openssl/curl/pacman
+# already guaranteed present on any real Arch install.
+system_deps = [
+    "mkvtoolnix-cli",
+    "ffmpeg",
+    "openssl",
+]
+optional_system_deps = []
+bread_deps = []
+license_file = "LICENSE"
+
+[[service]]
+unit = "breadarrd.service"
+enable = true
+
+[config]
+dir = "~/.config/breadarr"
+example = "config.example.toml"
+
+[install]
+post_install = [
+    "systemctl --user is-active --quiet breadarrd || systemctl --user start breadarrd",
+]

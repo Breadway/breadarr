@@ -50,8 +50,13 @@ api_key = ""
 bearer_token = ""
 
 [library]
-# Default root folder for shows added via the TUI's "Add Show" flow.
+# Default root folder for shows added via the TUI's "Add" flow. Each show
+# lands in its own "{root}/{Title} ({Year})" subfolder.
 default_root_folder = "~/breadarr-library"
+# Same, but for movies added via the TUI's "Add" flow — kept separate from
+# default_root_folder since movies and shows live under different category
+# roots on disk.
+movies_root_folder = "~/breadarr-library/Movies"
 
 [sources]
 # nyaa's English-translated anime category — the daemon polls this
