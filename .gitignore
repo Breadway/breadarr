@@ -6,3 +6,6 @@ config.toml
 
 # Local hygiene notes (not for commit)
 CLAUDE.md
+
+# graphify knowledge-graph output (local tool cache, not for commit)
+graphify-out/
