@@ -337,6 +337,7 @@ enum EncodeOutcome {
 /// original on most of a real backfill — regardless of how well-tuned the
 /// rate control is, this is what makes "never keep a non-improvement" true
 /// unconditionally.
+#[allow(clippy::too_many_arguments)]
 fn encode_and_verify(
     input: PathBuf,
     job_id: i64,
@@ -726,6 +727,10 @@ pub fn find_oversized_av1_candidates(conn: &Connection, cfg: &TranscodeConfig) -
 
 pub struct BacklogCandidate {
     pub episode_file_id: i64,
+    // Not read by current callers (they only need episode_file_id to look up
+    // the row again), but cheap to carry along for future logging/debugging
+    // of which file a candidate refers to.
+    #[allow(dead_code)]
     pub path: String,
     pub size_bytes: i64,
     pub video_codec: Option<String>,

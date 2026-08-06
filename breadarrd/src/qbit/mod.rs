@@ -69,6 +69,9 @@ pub struct TorrentInfo {
     pub name: String,
     pub state: String,
     pub progress: f64,
+    // Not read internally today, but kept to mirror qBittorrent's actual API
+    // shape 1:1 — useful in `{:?}` debug logging and cheap to keep in sync.
+    #[allow(dead_code)]
     pub save_path: String,
     /// Full path to the torrent's content (file or directory root) —
     /// qBittorrent resolves this for us, so importers don't need to guess

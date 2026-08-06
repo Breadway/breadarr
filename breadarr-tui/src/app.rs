@@ -598,7 +598,7 @@ impl App {
             return;
         };
         let (media_item_id, season_number, monitored) =
-            (detail.id, episode.season_number as i64, episode.monitored);
+            (detail.id, episode.season_number, episode.monitored);
         let result = if monitored {
             self.client
                 .unmonitor_season(media_item_id, season_number)

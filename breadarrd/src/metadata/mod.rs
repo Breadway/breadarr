@@ -41,6 +41,7 @@ pub struct EpisodeInfo {
 /// `MutexGuard` across an `.await` point — this convenience wrapper is only
 /// safe for callers with an owned, unshared `Connection` (e.g. the debug
 /// CLI commands).
+#[allow(clippy::too_many_arguments)]
 pub async fn add_series(
     conn: &Connection,
     tvdb: &tvdb::TvdbClient,

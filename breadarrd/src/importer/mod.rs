@@ -99,14 +99,6 @@ impl PendingGrab {
             PendingGrab::Movie { .. } | PendingGrab::SeasonPack { .. } => None,
         }
     }
-
-    fn root_folder(&self) -> &str {
-        match self {
-            PendingGrab::Episode { root_folder, .. }
-            | PendingGrab::Movie { root_folder, .. }
-            | PendingGrab::SeasonPack { root_folder, .. } => root_folder,
-        }
-    }
 }
 
 /// Three separate queries (rather than one `LEFT JOIN episode`) because a
@@ -1615,7 +1607,7 @@ impl StaleFile {
     /// later step (free-space check, the actual move) fails, so a failed
     /// import never leaves neither the old file nor the new one behind.
     fn restore(&self) {
-        if self.parked_at.as_os_str().len() > 0 {
+        if !self.parked_at.as_os_str().is_empty() {
             std::fs::rename(&self.parked_at, &self.restore_to).ok();
         }
     }
@@ -1909,7 +1901,7 @@ fn import_one(
         if let Some(row_id) = stale.row_id {
             conn.execute("DELETE FROM episode_file WHERE id = ?1", params![row_id])?;
         }
-        if stale.parked_at.as_os_str().len() > 0 {
+        if !stale.parked_at.as_os_str().is_empty() {
             std::fs::remove_file(&stale.parked_at).ok();
         }
     }
@@ -2309,7 +2301,7 @@ fn import_season_pack_file(
         if let Some(row_id) = stale.row_id {
             conn.execute("DELETE FROM episode_file WHERE id = ?1", params![row_id])?;
         }
-        if stale.parked_at.as_os_str().len() > 0 {
+        if !stale.parked_at.as_os_str().is_empty() {
             std::fs::remove_file(&stale.parked_at).ok();
         }
     }

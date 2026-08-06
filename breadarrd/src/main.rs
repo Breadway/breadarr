@@ -633,10 +633,11 @@ async fn background_loop(
                 // repaired (a rename or an in-place transcode) gets re-probed
                 // immediately rather than waiting for its own turn a full
                 // interval later.
-                match {
+                let probe_result = {
                     let conn = conn.lock().await;
                     importer::probe_library(&conn)
-                } {
+                };
+                match probe_result {
                     Ok(report) if report.probed > 0 || report.failed > 0 => {
                         info!(?report, "media probe sweep complete");
                     }

@@ -752,6 +752,10 @@ async fn grab_and_capture_hash(
 
 #[derive(Debug, Default)]
 pub struct GrabCycleStats {
+    // Only read via the derived `Debug` (the debug-grab-cycle CLI command
+    // prints the whole struct), which clippy's dead-code analysis doesn't
+    // credit as a read.
+    #[allow(dead_code)]
     pub items_seen: usize,
     pub new_items: usize,
     pub grabbed: usize,
@@ -840,8 +844,8 @@ pub async fn run_grab_cycle(
 ///   outright (TLS/connection error, not a slow response). Also
 ///   Cloudflare-fronted, so even if connectivity is restored it carries the
 ///   same risk profile 1337x does.
-/// If revisiting either, re-verify connectivity first — this isn't a
-/// permanent architectural decision, just what was true when checked.
+///   If revisiting either, re-verify connectivity first — this isn't a
+///   permanent architectural decision, just what was true when checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SearchRoute {
     /// Primary general-content (movies + non-anime TV) route — a JSON API,
@@ -851,6 +855,7 @@ enum SearchRoute {
     /// (not just "no relevant results") — the mirror-rotation/cooldown
     /// machinery already built for it is real resilience worth keeping,
     /// just no longer the first choice given TPB's better precision.
+    #[allow(dead_code)]
     X1337,
     NyaaSearch,
 }
@@ -1658,17 +1663,17 @@ pub async fn execute_search_targets(
                 // with, since dedup (`is_seen`/`mark_seen`) and grab records
                 // are keyed by source id — attributing a 1337x-sourced guid to
                 // TPB's source id would silently break dedup between the two.
-                let (fetch_result, result_source_id) =
-                    if primary_result.is_err() && matches!(target.route, SearchRoute::Tpb) {
+                let (fetch_result, result_source_id) = match primary_result {
+                    Err(e) if matches!(target.route, SearchRoute::Tpb) => {
                         tracing::warn!(
                             query = %target.query,
-                            error = %primary_result.as_ref().unwrap_err(),
+                            error = %e,
                             "TPB search failed, falling back to 1337x"
                         );
                         (scrape.fetch(Some(&target.query)).await, scrape_source_id)
-                    } else {
-                        (primary_result, primary_id)
-                    };
+                    }
+                    other => (other, primary_id),
+                };
 
                 match fetch_result {
                     Ok(items) => {
@@ -2821,7 +2826,7 @@ mod tests {
             seeders: Some(500),
             leechers: None,
         };
-        let mut items = vec![episode.clone(), pack.clone()];
+        let mut items = [episode.clone(), pack.clone()];
         items.sort_by_key(release_sort_key);
         assert_eq!(items[0].guid, "pack");
         assert_eq!(items[1].guid, "episode");
@@ -2845,7 +2850,7 @@ mod tests {
             seeders: Some(50),
             leechers: None,
         };
-        let mut items = vec![low.clone(), high.clone()];
+        let mut items = [low.clone(), high.clone()];
         items.sort_by_key(release_sort_key);
         assert_eq!(items[0].guid, "high");
         assert_eq!(items[1].guid, "low");
