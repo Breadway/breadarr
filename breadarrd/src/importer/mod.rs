@@ -335,6 +335,25 @@ fn move_or_copy_file(src: &Path, dest: &Path) -> Result<()> {
     })
 }
 
+/// Removes whatever's left of a torrent's download folder once every file
+/// breadarr cares about has already been moved out of it — split out from
+/// `run_import_cycle` so it's directly testable without a real qBittorrent
+/// server. `move_or_copy_file` only ever relocates the one video file it
+/// located; a multi-file release's own folder (sample clips, `.nfo`/`.srt`/
+/// `.jpg` sidecars) is otherwise left behind forever, since nothing else
+/// ever points at it once the torrent itself is gone from qBittorrent. A
+/// bare file (a release with no wrapping folder) needs no cleanup here —
+/// `move_or_copy_file` already consumed it. The `!= host_downloads_path`
+/// guard is defense in depth against a malformed `content_path` resolving
+/// to the downloads root itself; every real torrent lands in its own
+/// subdirectory or as a single file, never the root.
+fn cleanup_leftover_download_dir(content_path: &Path, host_downloads_path: &str) -> Result<()> {
+    if content_path.is_dir() && content_path != Path::new(host_downloads_path) {
+        std::fs::remove_dir_all(content_path)?;
+    }
+    Ok(())
+}
+
 /// The copy fallback's actual mechanics, split out so it's directly
 /// testable without needing a real cross-filesystem boundary to force
 /// `rename` to fail.
@@ -1354,9 +1373,17 @@ pub async fn run_import_cycle(
     // the torrent itself is just forgotten rather than left sitting around
     // in a "files missing" error state. Best-effort: a failed delete here
     // never undoes or blocks the import that already succeeded.
-    for hash in &imported_hashes {
+    for (hash, content_path) in &imported_hashes {
         if let Err(e) = qbit.delete_torrent(hash).await {
             tracing::warn!(hash, error = %e, "failed to remove completed torrent from qbittorrent");
+        }
+        if let Err(e) = cleanup_leftover_download_dir(content_path, host_downloads_path) {
+            tracing::warn!(
+                hash,
+                path = %content_path.display(),
+                error = %e,
+                "failed to remove leftover download directory after import"
+            );
         }
     }
 
@@ -1394,16 +1421,20 @@ fn process_pending_grabs(
     container_downloads_path: &str,
     host_downloads_path: &str,
     transcode_cfg: Option<&breadarr_shared::config::TranscodeConfig>,
-) -> Result<(ImportStats, Vec<String>)> {
+) -> Result<(ImportStats, Vec<(String, PathBuf)>)> {
     let mut stats = ImportStats::default();
-    // Torrent hashes whose data has been fully dealt with this cycle — moved
-    // into the library, or deleted outright because a better file already
-    // existed (see `ImportOutcome::SkippedAlreadyHaveBetter`, whose only
-    // producer, `import_one`, deletes the losing download itself). Either
-    // way nothing remains at the torrent's original location, so the caller
-    // (`run_import_cycle`, the async I/O boundary this function is
-    // deliberately kept free of) removes each from qBittorrent afterward.
-    let mut imported_hashes = Vec::new();
+    // Torrents whose data has been fully dealt with this cycle — moved into
+    // the library, or deleted outright because a better file already existed
+    // (see `ImportOutcome::SkippedAlreadyHaveBetter`, whose only producer,
+    // `import_one`, deletes the losing download itself). Either way nothing
+    // *breadarr still needs* remains at the torrent's original location, so
+    // the caller (`run_import_cycle`, the async I/O boundary this function is
+    // deliberately kept free of) removes each from qBittorrent afterward and
+    // clears out whatever's left of `content_path` — a multi-file release
+    // only ever has its video moved out by `move_or_copy_file`, so without
+    // this the surrounding folder (sample clips, .nfo/.srt/.jpg sidecars)
+    // sits there forever with no torrent left to account for it.
+    let mut imported_hashes: Vec<(String, PathBuf)> = Vec::new();
 
     for grab in pending {
         let Some(torrent) = torrents.iter().find(|t| t.hash == grab.torrent_hash()) else {
@@ -1467,7 +1498,7 @@ fn process_pending_grabs(
                     stats.imported += outcome.episodes_imported;
                     stats.quality_flagged += outcome.quality_flagged;
                     if outcome.episodes_imported > 0 {
-                        imported_hashes.push(grab.torrent_hash().to_string());
+                        imported_hashes.push((grab.torrent_hash().to_string(), content_path.clone()));
                     }
                 }
                 Err(e) => {
@@ -1505,13 +1536,13 @@ fn process_pending_grabs(
                 if quality_flagged {
                     stats.quality_flagged += 1;
                 }
-                imported_hashes.push(grab.torrent_hash().to_string());
+                imported_hashes.push((grab.torrent_hash().to_string(), content_path.clone()));
             }
             Ok(ImportOutcome::SkippedAlreadyHaveBetter) => {
                 // The download's data is already handled — `import_one`
                 // deleted the losing file itself — so there's nothing left
                 // for qBittorrent to track either.
-                imported_hashes.push(grab.torrent_hash().to_string());
+                imported_hashes.push((grab.torrent_hash().to_string(), content_path.clone()));
             }
             Err(e) => {
                 let error_count = record_import_error(conn, grab.release_id())?;
@@ -3223,6 +3254,57 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"fake video data");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cleanup_leftover_download_dir_removes_a_folder_with_only_sidecars_left() {
+        let downloads =
+            std::env::temp_dir().join(format!("breadarr-cleanup-test-{}", std::process::id()));
+        let release_dir = downloads.join("Some Movie 2016 1080p");
+        std::fs::create_dir_all(&release_dir).unwrap();
+        // The video was already moved out by `move_or_copy_file`; only the
+        // sidecar junk qBittorrent downloaded alongside it remains.
+        std::fs::write(release_dir.join("poster.jpg"), b"jpeg bytes").unwrap();
+        std::fs::write(release_dir.join("release.nfo"), b"nfo text").unwrap();
+
+        cleanup_leftover_download_dir(&release_dir, &downloads.to_string_lossy()).unwrap();
+
+        assert!(!release_dir.exists(), "the now-empty-of-video release folder should be gone");
+        assert!(downloads.exists(), "the shared downloads root itself must survive");
+
+        std::fs::remove_dir_all(&downloads).unwrap();
+    }
+
+    #[test]
+    fn cleanup_leftover_download_dir_is_a_noop_for_a_bare_file() {
+        let downloads =
+            std::env::temp_dir().join(format!("breadarr-cleanup-file-test-{}", std::process::id()));
+        std::fs::create_dir_all(&downloads).unwrap();
+        // A release with no wrapping folder — `move_or_copy_file` already
+        // consumed it, so `content_path` no longer exists at all.
+        let bare = downloads.join("Some.Movie.2016.1080p.mp4");
+
+        cleanup_leftover_download_dir(&bare, &downloads.to_string_lossy()).unwrap();
+
+        std::fs::remove_dir_all(&downloads).unwrap();
+    }
+
+    #[test]
+    fn cleanup_leftover_download_dir_refuses_to_remove_the_downloads_root_itself() {
+        let downloads = std::env::temp_dir()
+            .join(format!("breadarr-cleanup-guard-test-{}", std::process::id()));
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(downloads.join("unrelated-other-download.mkv"), b"data").unwrap();
+
+        // A malformed `content_path` that happens to equal the downloads
+        // root itself must never be wiped, even though it passes the
+        // `is_dir()` check.
+        cleanup_leftover_download_dir(&downloads, &downloads.to_string_lossy()).unwrap();
+
+        assert!(downloads.exists());
+        assert!(downloads.join("unrelated-other-download.mkv").exists());
+
+        std::fs::remove_dir_all(&downloads).unwrap();
     }
 
     #[test]
