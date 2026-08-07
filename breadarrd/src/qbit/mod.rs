@@ -40,6 +40,40 @@ struct AddTorrentResponse {
     success_count: u32,
     #[serde(default)]
     failure_count: u32,
+    /// Present when adding by URL rather than by a magnet/`.torrent` blob
+    /// qBittorrent already has in hand — the torrent itself is fetched
+    /// asynchronously, so the immediate response has neither succeeded nor
+    /// failed yet, just queued. nyaa's RSS feed always hands over a
+    /// `.torrent` download URL (never a magnet), so this is the normal
+    /// shape for every anime grab, not an edge case. Verified live against
+    /// the deployed qBittorrent: a URL add returns HTTP 202 with
+    /// `{"pending_count":1,"success_count":0,"failure_count":0}` — treating
+    /// `success_count == 0` alone as rejection (the previous check) silently
+    /// dropped every one of these while the torrent downloaded successfully
+    /// in the background, with no DB record and no log line.
+    #[serde(default)]
+    pending_count: u32,
+}
+
+/// Interprets a `torrents/add` response body — split out from `add_magnet`
+/// so it's directly testable without a live qBittorrent server.
+/// qBittorrent's add-torrent endpoint returns HTTP 200/202 even when it
+/// rejects the magnet outright (a dead/malformed hash, one it already knows
+/// is unreachable) — the response body is the only signal. Older
+/// qBittorrent versions returned plain text ("Ok." vs "Fails."); newer ones
+/// return a JSON summary with success_count/failure_count/pending_count
+/// instead (verified live against the currently deployed version). Without
+/// checking whichever shape is actually in play, a rejected magnet looks
+/// identical to a real success: the caller records a `release` row as
+/// grabbed and nothing ever downloads, silently and permanently (verified
+/// live — this happened for a real release under the old text-only check,
+/// and separately for every nyaa URL-add under a since-fixed
+/// `success_count == 0` check that didn't account for `pending_count`).
+fn add_torrent_response_is_rejected(body: &str) -> bool {
+    match serde_json::from_str::<AddTorrentResponse>(body) {
+        Ok(r) => r.failure_count > 0 || (r.success_count == 0 && r.pending_count == 0),
+        Err(_) => body.trim() != "Ok.",
+    }
 }
 
 pub struct QbitClient {
@@ -157,23 +191,7 @@ impl QbitClient {
             if !status.is_success() {
                 bail!("qbit add-torrent failed: status={status} body={body:?}");
             }
-            // qBittorrent's add-torrent endpoint returns HTTP 200 even when
-            // it rejects the magnet outright (a dead/malformed hash, one it
-            // already knows is unreachable) — the response body is the only
-            // signal. Older qBittorrent versions returned plain text ("Ok."
-            // vs "Fails."); newer ones return a JSON summary with
-            // success_count/failure_count instead (verified live against
-            // the currently deployed version). Without checking whichever
-            // shape is actually in play, a rejected magnet looks identical
-            // to a real success: the caller records a `release` row as
-            // grabbed and nothing ever downloads, silently and permanently
-            // (verified live — this happened for a real release under the
-            // old text-only check).
-            let rejected = match serde_json::from_str::<AddTorrentResponse>(&body) {
-                Ok(r) => r.failure_count > 0 || r.success_count == 0,
-                Err(_) => body.trim() != "Ok.",
-            };
-            if rejected {
+            if add_torrent_response_is_rejected(&body) {
                 return Err(anyhow::Error::new(MagnetRejected { body }));
             }
             return Ok(());
@@ -291,5 +309,39 @@ mod tests {
             extract_btih("https://1337x.to/torrent/3740704/Some-Show/"),
             None
         );
+    }
+
+    #[test]
+    fn a_pending_url_add_is_not_treated_as_rejected() {
+        // Exact shape qBittorrent 5.x returns for a URL add (every nyaa
+        // grab) — the torrent is queued for an async fetch, not yet
+        // succeeded or failed. This is the shape that used to be
+        // misread as an outright rejection.
+        let body = r#"{"added_torrent_ids":[],"failure_count":0,"pending_count":1,"success_count":0}"#;
+        assert!(!add_torrent_response_is_rejected(body));
+    }
+
+    #[test]
+    fn a_genuine_failure_is_still_rejected() {
+        let body = r#"{"failure_count":1,"pending_count":0,"success_count":0}"#;
+        assert!(add_torrent_response_is_rejected(body));
+    }
+
+    #[test]
+    fn an_in_band_success_is_not_rejected() {
+        // TPB/1337x magnets: qBittorrent already has the info hash, no
+        // async fetch needed, so success_count is set immediately.
+        let body = r#"{"failure_count":0,"pending_count":0,"success_count":1}"#;
+        assert!(!add_torrent_response_is_rejected(body));
+    }
+
+    #[test]
+    fn the_old_plain_text_ok_response_is_not_rejected() {
+        assert!(!add_torrent_response_is_rejected("Ok."));
+    }
+
+    #[test]
+    fn the_old_plain_text_fails_response_is_rejected() {
+        assert!(add_torrent_response_is_rejected("Fails."));
     }
 }

@@ -613,6 +613,33 @@ async fn process_item(
     let torrent_hash = match grab_and_capture_hash(qbit, &item.link, qbit_category).await {
         Ok(hash) => hash,
         Err(e) if e.downcast_ref::<crate::qbit::MagnetRejected>().is_some() => {
+            // Same reasoning as `HashCaptureFailed` just below: recording
+            // this as `failed` rather than leaving it with no release row
+            // at all is what makes a genuine rejection visible and frees
+            // the episode/movie to be re-searched later with a different
+            // candidate. A silent `Ok(MagnetRejected)` with nothing written
+            // used to be indistinguishable from a real success once
+            // `mark_seen` ran — a since-fixed bug in the response-rejection
+            // check (see `qbit::add_torrent_response_is_rejected`'s doc
+            // comment) made every nyaa URL-add hit this path even though
+            // the torrent was actually downloading, so this arm went
+            // unnoticed for a long time; logging it now that it only fires
+            // on real rejections.
+            tracing::warn!(title = %item.title, guid = %item.guid, "qbittorrent rejected this release's magnet/torrent");
+            record_grab(
+                conn,
+                media_item.id,
+                episode_id,
+                season_pack_number,
+                source_id,
+                &item.title,
+                &item.guid,
+                release_score,
+                item.size_bytes,
+                qbit_category,
+                None,
+                "failed",
+            )?;
             return Ok(ProcessOutcome::MagnetRejected);
         }
         Err(e) => return Err(e),
@@ -761,6 +788,7 @@ pub struct GrabCycleStats {
     pub grabbed: usize,
     pub errors: usize,
     pub queued_for_review: usize,
+    pub magnet_rejected: usize,
 }
 
 pub async fn run_grab_cycle(
@@ -811,6 +839,7 @@ pub async fn run_grab_cycle(
                 match outcome {
                     ProcessOutcome::Grabbed { .. } => stats.grabbed += 1,
                     ProcessOutcome::QueuedForReview => stats.queued_for_review += 1,
+                    ProcessOutcome::MagnetRejected => stats.magnet_rejected += 1,
                     _ => {}
                 }
             }
