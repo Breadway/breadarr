@@ -1,4 +1,5 @@
 /target
+/.ci-old-glibc
 config.toml
 *.db
 *.db-wal
