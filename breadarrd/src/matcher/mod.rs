@@ -4,14 +4,20 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use embed::{cosine_similarity, OrtEmbedder};
 
+// Pinned to Xenova/all-MiniLM-L6-v2 @ 751bff37182d3f1213fa05d7196b954e230abad9
+// (current `main` as of this change) — not the floating `main` branch.
 const MODEL_URL: &str =
-    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx";
+    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/onnx/model.onnx";
 const TOKENIZER_URL: &str =
-    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/tokenizer.json";
+// Official LFS sha256 of onnx/model.onnx at that commit.
+const MODEL_SHA256: &str = "759c3cd2b7fe7e93933ad23c4c9181b7396442a2ed746ec7c1d46192c469c46e";
+// sha256 of tokenizer.json at the same revision (not LFS; hashed from the published file).
+const TOKENIZER_SHA256: &str = "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0";
 
 /// Downloads the embedding model into `model_dir` if it isn't already
 /// there — keeps setup to "run the daemon," no separate fetch step, in
@@ -32,19 +38,21 @@ pub async fn ensure_model(model_dir: &Path) -> Result<(PathBuf, PathBuf)> {
 
     if !model_path.exists() {
         tracing::info!("downloading title-matching model (~90MB, one-time)");
-        download(MODEL_URL, model_path.clone()).await?;
+        download(MODEL_URL, model_path.clone(), MODEL_SHA256).await?;
     }
     if !tokenizer_path.exists() {
-        download(TOKENIZER_URL, tokenizer_path.clone()).await?;
+        download(TOKENIZER_URL, tokenizer_path.clone(), TOKENIZER_SHA256).await?;
     }
 
     Ok((model_path, tokenizer_path))
 }
 
-async fn download(url: &'static str, dest: PathBuf) -> Result<()> {
-    tokio::task::spawn_blocking(move || bread_onnx::download::ensure_file(url, &dest, None))
-        .await
-        .context("download task panicked")??;
+async fn download(url: &'static str, dest: PathBuf, sha256: &'static str) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        bread_onnx::download::ensure_file(url, &dest, Some(sha256))
+    })
+    .await
+    .context("download task panicked")??;
     Ok(())
 }
 
@@ -250,6 +258,36 @@ pub fn queue_for_review(
     link: Option<&str>,
     source_id: Option<i64>,
 ) -> Result<i64> {
+    // Same release + same library row already sitting in pending: a
+    // no-op instead of another TUI row. Upgrade-search used to re-list
+    // the same movie 7–11 times (verified live on hestia).
+    if let Some(existing) = conn
+        .query_row(
+            "SELECT id FROM review_queue
+             WHERE status = 'pending'
+               AND candidate_media_item_id = ?1
+               AND raw_release_title = ?2",
+            params![candidate.media_item_id, raw_release_title],
+            |row| row.get(0),
+        )
+        .optional()?
+    {
+        return Ok(existing);
+    }
+    if let (Some(link), Some(source_id)) = (link, source_id) {
+        if let Some(existing) = conn
+            .query_row(
+                "SELECT id FROM review_queue
+                 WHERE status = 'pending' AND source_id = ?1 AND link = ?2",
+                params![source_id, link],
+                |row| row.get(0),
+            )
+            .optional()?
+        {
+            return Ok(existing);
+        }
+    }
+
     conn.execute(
         "INSERT INTO review_queue (raw_release_title, candidate_media_item_id, confidence, link, source_id, status, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, 'pending', datetime('now'))",
@@ -322,5 +360,82 @@ mod tests {
             token_overlap_ratio("Saijo no Osewa", "Kimetsu no Yaiba"),
             0.0
         );
+    }
+
+    fn review_queue_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_item (id, kind, title, monitored, quality_profile_id, root_folder)
+             VALUES (1, 'movie', 'Cars 3', 1, 2, '/tmp')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source (id, name, kind, base_url) VALUES (1, 'tpb', 'scrape', 'http://x')",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn review_candidate() -> MatchCandidate {
+        MatchCandidate {
+            media_item_id: 1,
+            matched_text: "Cars 3".into(),
+            confidence: 0.7,
+        }
+    }
+
+    #[test]
+    fn queue_for_review_is_idempotent_for_the_same_pending_title() {
+        let conn = review_queue_conn();
+        let c = review_candidate();
+        let first = queue_for_review(&conn, "Cars.3.2017.1080p", &c, Some("magnet:a"), Some(1)).unwrap();
+        let second =
+            queue_for_review(&conn, "Cars.3.2017.1080p", &c, Some("magnet:a"), Some(1)).unwrap();
+        assert_eq!(first, second);
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM review_queue WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn queue_for_review_is_idempotent_for_the_same_pending_link() {
+        let conn = review_queue_conn();
+        let c = review_candidate();
+        let first =
+            queue_for_review(&conn, "Cars.3.2017.1080p", &c, Some("magnet:same"), Some(1)).unwrap();
+        let second = queue_for_review(
+            &conn,
+            "Cars.3.2017.2160p.UHD",
+            &c,
+            Some("magnet:same"),
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM review_queue WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn queue_for_review_still_accepts_a_different_title_and_link() {
+        let conn = review_queue_conn();
+        let c = review_candidate();
+        let a = queue_for_review(&conn, "Cars.3.2017.1080p", &c, Some("magnet:a"), Some(1)).unwrap();
+        let b = queue_for_review(&conn, "Cars.3.2017.2160p", &c, Some("magnet:b"), Some(1)).unwrap();
+        assert_ne!(a, b);
     }
 }

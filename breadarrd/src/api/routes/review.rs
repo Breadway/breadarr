@@ -75,21 +75,22 @@ pub async fn approve(
         }
     };
 
-    let torrent_hash = match scheduler::grab_prepared_approval(qbit, &state.qbit_category, &prepared).await {
-        Ok(hash) => hash,
-        Err(e) => {
-            // The grab errored outright (not just "added but no hash
-            // captured" — `finalize_review_approval` below handles that
-            // case and still runs to completion). `prepare_review_approval`
-            // already claimed this row into `approved` before we got here;
-            // without releasing it back to `pending`, a transient
-            // qBittorrent error would strand the review permanently
-            // unapprovable with nothing ever recorded for it.
-            let conn = state.conn.lock().await;
-            let _ = scheduler::release_review_claim(&conn, id);
-            return Err(internal(e));
-        }
-    };
+    let torrent_hash =
+        match scheduler::grab_prepared_approval(qbit, &state.qbit_category, &prepared).await {
+            Ok(hash) => hash,
+            Err(e) => {
+                // The grab errored outright (not just "added but no hash
+                // captured" — `finalize_review_approval` below handles that
+                // case and still runs to completion). `prepare_review_approval`
+                // already claimed this row into `approved` before we got here;
+                // without releasing it back to `pending`, a transient
+                // qBittorrent error would strand the review permanently
+                // unapprovable with nothing ever recorded for it.
+                let conn = state.conn.lock().await;
+                let _ = scheduler::release_review_claim(&conn, id);
+                return Err(internal(e));
+            }
+        };
 
     {
         let conn = state.conn.lock().await;
@@ -110,7 +111,12 @@ pub async fn reject(
     Path(id): Path<i64>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let conn = state.conn.lock().await;
-    scheduler::reject_review(&conn, id).map_err(internal)?;
+    if !scheduler::reject_review(&conn, id).map_err(internal)? {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no pending review item {id}"),
+        ));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

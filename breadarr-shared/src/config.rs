@@ -222,12 +222,10 @@ pub struct DaemonConfig {
     #[serde(default = "default_model_dir")]
     pub model_dir: String,
     /// Bearer token required on every API request when non-empty. Empty
-    /// (the default) means auth is off entirely — `listen_addr` defaults to
-    /// loopback-only, so a fresh install isn't suddenly locked out of its
-    /// own unconfigured daemon. This matters once `listen_addr` is changed
-    /// to bind non-loopback (e.g. so a TUI on a different host on the same
-    /// tailnet can reach it) — without a token, that's unauthenticated
-    /// add/delete/search access to anyone who can reach the port.
+    /// (the default) means auth is off entirely — allowed only when
+    /// `listen_addr` is loopback. A non-loopback bind with an empty token
+    /// is rejected at load. When set, the token must be at least 16
+    /// characters so a length-oracle of short guesses is useless.
     #[serde(default)]
     pub api_token: String,
 }
@@ -595,11 +593,10 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Rejects a handful of `transcode` values that are individually
-    /// syntactically valid TOML but make the transcode pipeline's math
-    /// nonsensical — there's no other validation anywhere in this config,
-    /// so a typo here would otherwise only surface much later, deep inside
-    /// an encode.
+    /// Rejects values that are individually syntactically valid TOML but
+    /// make the daemon unsafe or the transcode pipeline's math nonsensical
+    /// — a typo here would otherwise only surface much later, or bind an
+    /// unauthenticated API on a reachable address.
     fn validate(&self) -> Result<()> {
         // `target_bitrate_kbps` divides by `reference_height` (via
         // `reference_pixels`); zero makes that ratio `f64::INFINITY`, which
@@ -623,7 +620,67 @@ impl Config {
             (0.0..=1.0).contains(&self.transcode.min_size_reduction_pct),
             "transcode.min_size_reduction_pct must be between 0.0 and 1.0"
         );
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.transcode.skip_below_ceiling_ratio),
+            "transcode.skip_below_ceiling_ratio must be between 0.0 and 1.0"
+        );
+        anyhow::ensure!(
+            self.transcode.parallelism_min >= 1,
+            "transcode.parallelism_min must be at least 1"
+        );
+        anyhow::ensure!(
+            self.transcode.parallelism_max >= self.transcode.parallelism_min,
+            "transcode.parallelism_max must be >= parallelism_min"
+        );
+        anyhow::ensure!(
+            self.transcode.parallelism_max_anime >= 1,
+            "transcode.parallelism_max_anime must be at least 1"
+        );
+        anyhow::ensure!(
+            (0..=63).contains(&self.transcode.quality_anime),
+            "transcode.quality_anime must be between 0 and 63"
+        );
+        anyhow::ensure!(
+            (0..=13).contains(&self.transcode.anime_svtav1_preset),
+            "transcode.anime_svtav1_preset must be between 0 and 13"
+        );
+        anyhow::ensure!(
+            self.transcode.verify_sample_secs.is_finite()
+                && self.transcode.verify_sample_secs > 0.0,
+            "transcode.verify_sample_secs must be greater than 0"
+        );
+        const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace", "off"];
+        anyhow::ensure!(
+            LOG_LEVELS
+                .iter()
+                .any(|l| self.daemon.log_level.eq_ignore_ascii_case(l)),
+            "daemon.log_level must be one of error, warn, info, debug, trace, off"
+        );
+        if !self.daemon.api_token.is_empty() {
+            anyhow::ensure!(
+                self.daemon.api_token.len() >= 16,
+                "daemon.api_token must be at least 16 characters when set"
+            );
+        }
+        if self.daemon.api_token.is_empty() && !is_loopback_listen_addr(&self.daemon.listen_addr) {
+            anyhow::bail!(
+                "daemon.api_token is required when listen_addr ({}) is not loopback",
+                self.daemon.listen_addr
+            );
+        }
         Ok(())
+    }
+
+    /// `true` when `daemon.listen_addr` is loopback (`127.0.0.1`, `::1`,
+    /// `localhost`). Used at startup to decide whether an empty token is
+    /// merely a local-process warning or already refused by `validate`.
+    pub fn listen_is_loopback(&self) -> bool {
+        is_loopback_listen_addr(&self.daemon.listen_addr)
+    }
+
+    /// Expand a `~/...` path the same way configured library roots are.
+    pub fn expand_path(input: &str) -> PathBuf {
+        expand_home(input)
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -664,6 +721,29 @@ fn expand_home(input: &str) -> PathBuf {
         return bread_utils::xdg::home_dir().join(stripped);
     }
     PathBuf::from(input)
+}
+
+/// Loopback hosts we allow to bind without an API token: IPv4/IPv6
+/// loopback socket addresses, plus the `localhost` hostname form.
+fn is_loopback_listen_addr(listen_addr: &str) -> bool {
+    if let Ok(addr) = listen_addr.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+    let host = if let Some(rest) = listen_addr.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else if let Some((h, port)) = listen_addr.rsplit_once(':') {
+        if port.parse::<u16>().is_ok() && !h.contains(':') {
+            h
+        } else {
+            listen_addr
+        }
+    } else {
+        listen_addr
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn default_log_level() -> String {
@@ -747,6 +827,101 @@ mod tests {
     #[test]
     fn rejects_a_min_size_reduction_pct_above_one() {
         let cfg: Config = toml::from_str("[transcode]\nmin_size_reduction_pct = 1.5\n").unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn default_loopback_with_empty_token_is_ok() {
+        Config::default().validate().unwrap();
+        assert!(is_loopback_listen_addr("127.0.0.1:7879"));
+        assert!(is_loopback_listen_addr("localhost:7879"));
+        assert!(is_loopback_listen_addr("[::1]:7879"));
+        assert!(is_loopback_listen_addr("::1"));
+    }
+
+    #[test]
+    fn non_loopback_without_token_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.daemon.listen_addr = "0.0.0.0:7879".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn non_loopback_with_token_is_ok() {
+        let mut cfg = Config::default();
+        cfg.daemon.listen_addr = "0.0.0.0:7879".into();
+        cfg.daemon.api_token = "a-token-16-chars+".into();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn short_api_token_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.daemon.api_token = "tooshort".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_log_level() {
+        let mut cfg = Config::default();
+        cfg.daemon.log_level = "loud".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_off_log_level() {
+        let mut cfg = Config::default();
+        cfg.daemon.log_level = "off".into();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_skip_below_ceiling_ratio_out_of_range() {
+        let mut cfg = Config::default();
+        cfg.transcode.skip_below_ceiling_ratio = 1.5;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_parallelism_min() {
+        let mut cfg = Config::default();
+        cfg.transcode.parallelism_min = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_parallelism_max_below_min() {
+        let mut cfg = Config::default();
+        cfg.transcode.parallelism_min = 3;
+        cfg.transcode.parallelism_max = 2;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_parallelism_max_anime() {
+        let mut cfg = Config::default();
+        cfg.transcode.parallelism_max_anime = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_quality_anime_out_of_range() {
+        let mut cfg = Config::default();
+        cfg.transcode.quality_anime = 64;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_anime_svtav1_preset_out_of_range() {
+        let mut cfg = Config::default();
+        cfg.transcode.anime_svtav1_preset = 14;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_verify_sample_secs() {
+        let mut cfg = Config::default();
+        cfg.transcode.verify_sample_secs = 0.0;
         assert!(cfg.validate().is_err());
     }
 }

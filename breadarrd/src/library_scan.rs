@@ -435,7 +435,15 @@ pub async fn scan_tv_root(
             report.unmatched.push(folder_name);
             continue;
         };
-        let tvdb_id: i64 = best.external_id.parse().unwrap_or_default();
+        let Some(tvdb_id) = metadata::parse_external_id(&best.external_id) else {
+            tracing::warn!(
+                folder = %folder_name,
+                external_id = %best.external_id,
+                "tvdb id was not a positive integer, skipping"
+            );
+            report.unmatched.push(folder_name);
+            continue;
+        };
         let canonical_year = best.year.or(year);
         // Normalize the folder itself down to "Title (Year)" — release
         // tags/resolution/group cruft in the original folder name isn't
@@ -729,7 +737,15 @@ pub async fn scan_movie_root(
             report.unmatched.push(folder_name);
             continue;
         };
-        let tmdb_id: i64 = best.external_id.parse().unwrap_or_default();
+        let Some(tmdb_id) = metadata::parse_external_id(&best.external_id) else {
+            tracing::warn!(
+                folder = %folder_name,
+                external_id = %best.external_id,
+                "tmdb id was not a positive integer, skipping"
+            );
+            report.unmatched.push(folder_name);
+            continue;
+        };
         let canonical_year = best.year.or(year);
 
         // Normalizes the folder itself down to "Title (Year)" too — release
@@ -882,5 +898,13 @@ mod tests {
                 None
             )
         );
+    }
+
+    #[test]
+    fn parse_external_id_never_yields_zero() {
+        assert_eq!(metadata::parse_external_id("0"), None);
+        assert_eq!(metadata::parse_external_id("000"), None);
+        assert_eq!(metadata::parse_external_id("not-a-number"), None);
+        assert_eq!(metadata::parse_external_id("550"), Some(550));
     }
 }

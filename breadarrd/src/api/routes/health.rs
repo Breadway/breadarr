@@ -1,6 +1,6 @@
 use axum::extract::State;
 use axum::Json;
-use breadarr_shared::dto::{CycleInfo, HealthDetail};
+use breadarr_shared::dto::{CycleInfo, HealthDetail, HealthStatus};
 
 use crate::api::AppState;
 
@@ -12,7 +12,15 @@ fn to_info(r: &crate::api::CycleRecord) -> CycleInfo {
     }
 }
 
-pub async fn health(State(state): State<AppState>) -> Json<HealthDetail> {
+/// Unauthenticated liveness — cheap, no cycle detail.
+pub async fn health() -> Json<HealthStatus> {
+    Json(HealthStatus {
+        status: "ok".to_string(),
+    })
+}
+
+/// Authenticated cycle-status payload (same as the old `/health`).
+pub async fn health_detail(State(state): State<AppState>) -> Json<HealthDetail> {
     let status = state.cycle_status.lock().expect("cycle_status poisoned");
     Json(HealthDetail {
         status: "ok".to_string(),

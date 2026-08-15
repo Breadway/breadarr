@@ -1,11 +1,13 @@
 /target
 /.ci-old-glibc
 config.toml
+breadarrd.toml
 *.db
 *.db-wal
 *.db-shm
 
 # Local hygiene notes (not for commit)
+CLAUDE.md
 
 # Leftover source tarballs (never commit these)
 **/src.tar.xz

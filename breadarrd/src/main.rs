@@ -150,7 +150,10 @@ async fn run_daemon(config: Config) -> Result<()> {
     info!(path = %config.db_path().display(), "database ready");
     match transcode::reset_orphaned_running_jobs(&conn) {
         Ok(0) => {}
-        Ok(n) => info!(n, "reset orphaned 'running' transcode jobs left over from a previous crash"),
+        Ok(n) => info!(
+            n,
+            "reset orphaned 'running' transcode jobs left over from a previous crash"
+        ),
         Err(e) => tracing::warn!(error = %e, "failed to reset orphaned transcode jobs"),
     }
 
@@ -168,6 +171,14 @@ async fn run_daemon(config: Config) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&config.daemon.listen_addr).await?;
     info!(addr = %config.daemon.listen_addr, "listening");
+    if config.daemon.api_token.is_empty() {
+        tracing::warn!(
+            "daemon.api_token is empty; any local process can add/delete/grab via {}",
+            config.daemon.listen_addr
+        );
+    } else if !config.listen_is_loopback() {
+        info!("API token auth is required (listen_addr is non-loopback)");
+    }
 
     let tvdb = if config.tvdb.api_key.is_empty() {
         None
@@ -195,6 +206,10 @@ async fn run_daemon(config: Config) -> Result<()> {
         )))
     };
     let (background_tx, background_rx) = tokio::sync::mpsc::channel(8);
+    // Lifted out of `background_loop` so shutdown can wait for an in-flight
+    // ffmpeg encode instead of dropping the process the instant SIGTERM
+    // arrives (systemd's TimeoutStopSec is longer than this wait).
+    let transcode_busy = std::sync::Arc::new(tokio::sync::Mutex::new(()));
 
     let background_conn = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
     let state = api::AppState {
@@ -224,6 +239,7 @@ async fn run_daemon(config: Config) -> Result<()> {
             config.clone(),
             state.cycle_status.clone(),
             background_rx,
+            transcode_busy.clone(),
         )
     });
     let mut state = state;
@@ -268,6 +284,15 @@ async fn run_daemon(config: Config) -> Result<()> {
         }
     }
 
+    // Wait for an in-flight transcode (it holds this mutex for the whole
+    // cycle) so ffmpeg can finish, or at least so systemd's longer
+    // TimeoutStopSec applies instead of an instant drop.
+    info!("waiting up to 120s for in-flight transcode to finish");
+    match tokio::time::timeout(std::time::Duration::from_secs(120), transcode_busy.lock()).await {
+        Ok(_) => info!("no in-flight transcode (or it finished)"),
+        Err(_) => tracing::warn!("timed out waiting 120s for in-flight transcode"),
+    }
+
     Ok(())
 }
 
@@ -290,6 +315,7 @@ async fn background_loop(
     config: Config,
     cycle_status: std::sync::Arc<std::sync::Mutex<api::CycleStatus>>,
     mut background_rx: tokio::sync::mpsc::Receiver<api::BackgroundRequest>,
+    transcode_busy: std::sync::Arc<tokio::sync::Mutex<()>>,
 ) {
     let notifier = notify::Notifier::new(&config.notifications.webhook_url);
     {
@@ -372,8 +398,7 @@ async fn background_loop(
     // fires (a real possibility: files easily take longer to encode than
     // `poll_interval_secs`). `claim_pending_jobs`'s own concurrency cap
     // already makes overlap *safe*; this just keeps it from happening
-    // pointlessly.
-    let transcode_busy = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    // pointlessly. Created in `run_daemon` so shutdown can wait on it.
     let mut transcode_ticker = tokio::time::interval(std::time::Duration::from_secs(
         config.transcode.poll_interval_secs,
     ));

@@ -17,7 +17,14 @@ UMask=0022
 RuntimeDirectory=breadarr
 RuntimeDirectoryMode=0700
 KillSignal=SIGTERM
-TimeoutStopSec=5
+# Transcode jobs can run for minutes; 5s was cutting them off on stop.
+TimeoutStopSec=180
+# Modest hardening valid in a user unit. Skip ProtectHome (library +
+# config live under $HOME) and MemoryDenyWriteExecute (ort/onnxruntime
+# may need JIT / RWX mappings).
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=default.target

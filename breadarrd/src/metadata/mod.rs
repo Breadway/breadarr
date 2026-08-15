@@ -5,7 +5,7 @@ pub mod tvdb;
 use std::collections::HashSet;
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeriesSearchResult {
@@ -65,6 +65,21 @@ pub async fn add_series(
     )
 }
 
+/// TVDB/TMDB ids are positive integers. `"0"` and non-numeric strings
+/// must not be stored — `0` would collide under the unique external-id
+/// indexes the same way a parse-failure `unwrap_or_default()` used to.
+pub(crate) fn parse_external_id(raw: &str) -> Option<i64> {
+    raw.parse().ok().filter(|&id| id > 0)
+}
+
+fn existing_media_item_id(conn: &Connection, column: &str, value: i64) -> Result<Option<i64>> {
+    debug_assert!(column == "tvdb_id" || column == "tmdb_id");
+    let sql = format!("SELECT id FROM media_item WHERE {column} = ?1 ORDER BY id ASC LIMIT 1");
+    conn.query_row(&sql, params![value], |row| row.get(0))
+        .optional()
+        .map_err(Into::into)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn insert_series(
     conn: &Connection,
@@ -76,21 +91,23 @@ pub fn insert_series(
     quality_profile_id: i64,
     episodes: &[EpisodeInfo],
 ) -> Result<i64> {
-    conn.execute(
+    let tvdb_id = parse_external_id(tvdb_series_id);
+    if let Some(tvdb_id) = tvdb_id {
+        if let Some(existing) = existing_media_item_id(conn, "tvdb_id", tvdb_id)? {
+            return Ok(existing);
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO media_item (kind, title, year, tvdb_id, monitored, quality_profile_id, root_folder)
          VALUES ('series', ?1, ?2, ?3, 1, ?4, ?5)",
-        params![
-            title,
-            year,
-            tvdb_series_id.parse::<i64>().ok(),
-            quality_profile_id,
-            root_folder
-        ],
+        params![title, year, tvdb_id, quality_profile_id, root_folder],
     )?;
-    let media_item_id = conn.last_insert_rowid();
+    let media_item_id = tx.last_insert_rowid();
 
     for alias in aliases {
-        conn.execute(
+        tx.execute(
             "INSERT INTO alias (media_item_id, text, source) VALUES (?1, ?2, 'tvdb')",
             params![media_item_id, alias],
         )?;
@@ -109,12 +126,12 @@ pub fn insert_series(
         // seasons keep the previous default of monitored.
         let monitored = i64::from(ep.season_number != 0);
         if seasons_seen.insert(ep.season_number) {
-            conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO season (media_item_id, season_number, monitored) VALUES (?1, ?2, ?3)",
                 params![media_item_id, ep.season_number, monitored],
             )?;
         }
-        conn.execute(
+        tx.execute(
             "INSERT OR IGNORE INTO episode
                 (media_item_id, season_number, episode_number, absolute_number, title, air_date, monitored, has_file)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
@@ -130,6 +147,7 @@ pub fn insert_series(
         )?;
     }
 
+    tx.commit()?;
     Ok(media_item_id)
 }
 
@@ -145,16 +163,177 @@ pub fn insert_movie(
     root_folder: &str,
     quality_profile_id: i64,
 ) -> Result<i64> {
+    let tmdb_id = parse_external_id(tmdb_movie_id);
+    if let Some(tmdb_id) = tmdb_id {
+        if let Some(existing) = existing_media_item_id(conn, "tmdb_id", tmdb_id)? {
+            return Ok(existing);
+        }
+    }
+
     conn.execute(
         "INSERT INTO media_item (kind, title, year, tmdb_id, monitored, quality_profile_id, root_folder)
          VALUES ('movie', ?1, ?2, ?3, 1, ?4, ?5)",
-        params![
-            title,
-            year,
-            tmdb_movie_id.parse::<i64>().ok(),
-            quality_profile_id,
-            root_folder
-        ],
+        params![title, year, tmdb_id, quality_profile_id, root_folder],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    fn conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init(&conn).unwrap();
+        conn
+    }
+
+    fn ep(season: u32, episode: u32) -> EpisodeInfo {
+        EpisodeInfo {
+            season_number: season,
+            episode_number: episode,
+            absolute_number: None,
+            title: Some(format!("E{episode}")),
+            air_date: Some("2020-01-01".into()),
+        }
+    }
+
+    #[test]
+    fn parse_external_id_rejects_zero_and_garbage() {
+        assert_eq!(parse_external_id("550"), Some(550));
+        assert_eq!(parse_external_id("0"), None);
+        assert_eq!(parse_external_id("-12"), None);
+        assert_eq!(parse_external_id("not-a-number"), None);
+        assert_eq!(parse_external_id(""), None);
+    }
+
+    #[test]
+    fn insert_series_writes_seasons_and_episodes_together() {
+        let conn = conn();
+        let id = insert_series(
+            &conn,
+            "12345",
+            "Show",
+            Some(2020),
+            &["Alias".into()],
+            "/tv/Show",
+            1,
+            &[ep(1, 1), ep(1, 2), ep(2, 1)],
+        )
+        .unwrap();
+
+        let seasons: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM season WHERE media_item_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let episodes: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM episode WHERE media_item_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let aliases: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM alias WHERE media_item_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(seasons, 2);
+        assert_eq!(episodes, 3);
+        assert_eq!(aliases, 1);
+    }
+
+    #[test]
+    fn insert_series_rolls_back_when_an_episode_insert_fails() {
+        let conn = conn();
+        conn.execute(
+            "CREATE TRIGGER fail_episode BEFORE INSERT ON episode
+             BEGIN SELECT RAISE(ABORT, 'boom'); END",
+            [],
+        )
+        .unwrap();
+
+        let err = insert_series(
+            &conn,
+            "99",
+            "Show",
+            None,
+            &["A".into()],
+            "/tv/Show",
+            1,
+            &[ep(1, 1)],
+        );
+        assert!(err.is_err());
+
+        let items: i64 = conn
+            .query_row("SELECT count(*) FROM media_item", [], |r| r.get(0))
+            .unwrap();
+        let seasons: i64 = conn
+            .query_row("SELECT count(*) FROM season", [], |r| r.get(0))
+            .unwrap();
+        let aliases: i64 = conn
+            .query_row("SELECT count(*) FROM alias", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(items, 0);
+        assert_eq!(seasons, 0);
+        assert_eq!(aliases, 0);
+    }
+
+    #[test]
+    fn insert_series_is_idempotent_on_tvdb_id() {
+        let conn = conn();
+        let first = insert_series(
+            &conn,
+            "12345",
+            "Show",
+            None,
+            &[],
+            "/tv/Show",
+            1,
+            &[ep(1, 1)],
+        )
+        .unwrap();
+        let second = insert_series(
+            &conn,
+            "12345",
+            "Other Title",
+            None,
+            &[],
+            "/tv/Other",
+            1,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM media_item WHERE tvdb_id = 12345",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn insert_movie_is_idempotent_on_tmdb_id() {
+        let conn = conn();
+        let first = insert_movie(&conn, "550", "Fight Club", Some(1999), "/movies", 2).unwrap();
+        let second = insert_movie(&conn, "550", "Fight Club 2", Some(2000), "/movies", 2).unwrap();
+        assert_eq!(first, second);
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM media_item WHERE tmdb_id = 550",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }

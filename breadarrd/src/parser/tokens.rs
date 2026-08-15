@@ -29,6 +29,9 @@ static BIT_DEPTH_RE: LazyLock<Regex> =
 pub(super) static REPACK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(REPACK|PROPER)\b").unwrap());
 
+static HDR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:HDR10\+?|HDR|Dolby[.\s]?Vision|DoVi|DV)\b").unwrap());
+
 static YEAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[(\[](19|20)\d{2}[)\]]").unwrap());
 // Scene-style releases ("Dune.1984.1080p.BluRay.x264-GROUP") carry the year
 // bare, with no surrounding brackets — `YEAR_RE` above never matches these
@@ -179,6 +182,10 @@ pub(super) fn extract_codec(s: &str) -> Option<Codec> {
 
 pub(super) fn extract_bit_depth(s: &str) -> Option<u8> {
     BIT_DEPTH_RE.captures(s)?[1].parse().ok()
+}
+
+pub(super) fn extract_hdr(s: &str) -> bool {
+    HDR_RE.is_match(s)
 }
 
 pub(super) fn extract_year(s: &str) -> Option<u32> {

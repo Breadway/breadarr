@@ -20,7 +20,7 @@ use app::{App, Focus, LibraryRoots, StuckSection, Tab};
 async fn main() -> Result<()> {
     let config = Config::load()?;
     let base_url = format!("http://{}", config.daemon.listen_addr);
-    let client = DaemonClient::new(base_url, &config.daemon.api_token);
+    let client = DaemonClient::new(base_url, &config.daemon.api_token)?;
     let roots = LibraryRoots {
         series: config.default_root_folder().to_string_lossy().to_string(),
         movies: config.movies_root_folder().to_string_lossy().to_string(),
@@ -50,6 +50,8 @@ async fn run(
     let mut last_refresh = tokio::time::Instant::now() - Duration::from_secs(10);
 
     loop {
+        app.poll_background().await;
+
         if last_refresh.elapsed() >= Duration::from_secs(3) || app.force_refresh {
             app.refresh_active_tab().await;
             app.force_refresh = false;
@@ -81,7 +83,9 @@ async fn handle_key(app: &mut App, code: KeyCode, roots: &LibraryRoots) {
             KeyCode::Backspace => {
                 app.add_query.pop();
             }
-            KeyCode::Esc => app.should_quit = true,
+            KeyCode::Esc => {
+                app.add_query.clear();
+            }
             KeyCode::Tab => cycle_tab(app),
             _ => {}
         }

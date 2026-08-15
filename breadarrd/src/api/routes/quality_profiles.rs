@@ -68,6 +68,12 @@ pub async fn update_weights(
     Path(id): Path<i64>,
     Json(req): Json<UpdateQualityProfileWeightsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    if !weights_are_valid(&req.weights) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "quality-profile weights must be finite and >= 0".into(),
+        ));
+    }
     let weights_json = serde_json::to_string(&req.weights).map_err(internal)?;
     let conn = state.conn.lock().await;
     let updated = conn
@@ -82,6 +88,59 @@ pub async fn update_weights(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn weights_are_valid(w: &WeightsDto) -> bool {
+    [
+        w.seeder,
+        w.resolution_tier,
+        w.source_tier,
+        w.codec_tier,
+        w.bit_depth,
+        w.container,
+        w.group_allowlist,
+        w.repack,
+        w.hdr,
+    ]
+    .into_iter()
+    .all(|v| v.is_finite() && v >= 0.0)
+}
+
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_weights() -> WeightsDto {
+        WeightsDto {
+            seeder: 1.0,
+            resolution_tier: 1.0,
+            source_tier: 1.0,
+            codec_tier: 1.0,
+            bit_depth: 1.0,
+            container: 1.0,
+            group_allowlist: 1.0,
+            repack: 1.0,
+            hdr: 1.0,
+        }
+    }
+
+    #[test]
+    fn weights_are_valid_accepts_finite_non_negative() {
+        assert!(weights_are_valid(&valid_weights()));
+    }
+
+    #[test]
+    fn weights_are_valid_rejects_nan_inf_and_negative() {
+        let mut w = valid_weights();
+        w.seeder = f32::NAN;
+        assert!(!weights_are_valid(&w));
+        w = valid_weights();
+        w.hdr = f32::INFINITY;
+        assert!(!weights_are_valid(&w));
+        w = valid_weights();
+        w.repack = -0.1;
+        assert!(!weights_are_valid(&w));
+    }
 }

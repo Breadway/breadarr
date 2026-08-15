@@ -34,6 +34,7 @@ pub struct ParsedRelease {
     pub bit_depth: Option<u8>,
     pub container: Option<String>,
     pub is_repack: bool,
+    pub has_hdr: bool,
 }
 
 pub fn parse(raw_title: &str) -> ParsedRelease {
@@ -53,6 +54,7 @@ pub fn parse(raw_title: &str) -> ParsedRelease {
     let codec = tokens::extract_codec(&work);
     let bit_depth = tokens::extract_bit_depth(&work);
     let is_repack = tokens::REPACK_RE.is_match(&work);
+    let has_hdr = tokens::extract_hdr(&work);
     let year = tokens::extract_year(&work);
     let (season, episode, absolute_episode, title_span_end) = tokens::extract_episode_info(&work);
 
@@ -72,6 +74,7 @@ pub fn parse(raw_title: &str) -> ParsedRelease {
         bit_depth,
         container,
         is_repack,
+        has_hdr,
     }
 }
 
@@ -358,6 +361,16 @@ mod tests {
     fn brackets_still_take_priority_over_a_coincidental_bare_year() {
         let p = parse("Some.Show.2024.S01E01.(2023).1080p.WEB-DL");
         assert_eq!(p.year, Some(2023));
+    }
+
+    #[test]
+    fn parses_hdr_hdr10_and_dolby_vision_tokens() {
+        assert!(parse("Movie.2024.2160p.HDR.mkv").has_hdr);
+        assert!(parse("Movie.2024.DV.mkv").has_hdr);
+        assert!(parse("Movie.2024.2160p.HDR10.BluRay").has_hdr);
+        assert!(parse("Movie.2024.2160p.DoVi.mkv").has_hdr);
+        assert!(parse("Movie.2024.Dolby.Vision.2160p").has_hdr);
+        assert!(!parse("Movie.2024.1080p.WEB-DL.H264").has_hdr);
     }
 
     #[test]

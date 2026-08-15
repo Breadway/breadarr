@@ -201,9 +201,17 @@ pub(crate) fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
-        if path.is_dir() {
+        // `path.is_dir()` follows symlinks, which would let a planted
+        // directory link walk the importer (and library-scan) out of the
+        // download/library root. Skip every symlink — file links to videos
+        // included — and only recurse into real directories.
+        let ft = std::fs::symlink_metadata(&path)?.file_type();
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             out.extend(walk_files(&path)?);
-        } else {
+        } else if ft.is_file() {
             out.push(path);
         }
     }
@@ -263,9 +271,25 @@ pub(crate) fn deterministic_movie_filename(title: &str, year: Option<i64>, ext: 
 }
 
 pub(crate) fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
-        .collect()
+    let cleaned: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_control() || "/\\:*?\"<>|".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    // After the replacements above, a title of `.` or `..` is still a
+    // hostile path component (`root_folder/../file`). Slash-containing
+    // titles become `foo_.._bar`, which is fine — only a lone `.`/`..`
+    // can climb.
+    if cleaned == "." || cleaned == ".." {
+        "_".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// True when there isn't enough free space at `dir` to hold `needed_bytes`.
@@ -335,6 +359,116 @@ fn move_or_copy_file(src: &Path, dest: &Path) -> Result<()> {
     })
 }
 
+fn is_video_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| VIDEO_EXTS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Lexical `..`/`.` collapse without touching the filesystem — used when
+/// `canonicalize` can't (path missing) and by `remap_path` before the
+/// joined result is allowed to escape `host_prefix`.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(p) => out.push(p.as_os_str()),
+            Component::RootDir => out.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(c) => out.push(c),
+        }
+    }
+    out
+}
+
+fn canonicalize_or_normalize(path: &Path) -> PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    if let Some(parent) = path.parent() {
+        if let (Ok(canon_parent), Some(name)) = (std::fs::canonicalize(parent), path.file_name()) {
+            return canon_parent.join(name);
+        }
+    }
+    if path.is_absolute() {
+        return normalize_lexically(path);
+    }
+    std::env::current_dir()
+        .map(|cwd| normalize_lexically(&cwd.join(path)))
+        .unwrap_or_else(|_| normalize_lexically(path))
+}
+
+fn is_strictly_inside(path: &Path, root: &Path) -> bool {
+    let path = canonicalize_or_normalize(path);
+    let root = canonicalize_or_normalize(root);
+    path.starts_with(&root) && path != root
+}
+
+fn is_common_filesystem_root(path: &Path) -> bool {
+    let normalized = canonicalize_or_normalize(path);
+    if normalized == Path::new("/")
+        || normalized == Path::new("/mnt")
+        || normalized == Path::new("/media")
+    {
+        return true;
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        if normalized == Path::new(&home) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `true` only for a per-torrent folder we are willing to `remove_dir_all`.
+/// A configured `host_downloads_path` must strictly contain `content_path`;
+/// an empty host falls back to "has a real parent that isn't `/` and isn't
+/// a well-known root" so a default-empty config cannot wipe `/` or `$HOME`.
+fn is_safe_cleanup_target(content_path: &Path, host_downloads_path: &str) -> bool {
+    let meta = match std::fs::symlink_metadata(content_path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return false;
+    }
+    if !host_downloads_path.is_empty() {
+        return is_strictly_inside(content_path, Path::new(host_downloads_path));
+    }
+    if is_common_filesystem_root(content_path) {
+        return false;
+    }
+    let Some(parent) = content_path.parent() else {
+        return false;
+    };
+    if parent == Path::new("/") || parent.as_os_str().is_empty() || !parent.exists() {
+        return false;
+    }
+    content_path != parent
+}
+
+fn dir_contains_video_files(dir: &Path) -> bool {
+    match walk_files(dir) {
+        Ok(files) => files.iter().any(|p| is_video_path(p)),
+        // A walk failure must not authorize a wipe.
+        Err(_) => true,
+    }
+}
+
+fn remove_non_video_files(dir: &Path) -> Result<()> {
+    for path in walk_files(dir)? {
+        if !is_video_path(&path) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
 /// Removes whatever's left of a torrent's download folder once every file
 /// breadarr cares about has already been moved out of it — split out from
 /// `run_import_cycle` so it's directly testable without a real qBittorrent
@@ -343,14 +477,21 @@ fn move_or_copy_file(src: &Path, dest: &Path) -> Result<()> {
 /// `.jpg` sidecars) is otherwise left behind forever, since nothing else
 /// ever points at it once the torrent itself is gone from qBittorrent. A
 /// bare file (a release with no wrapping folder) needs no cleanup here —
-/// `move_or_copy_file` already consumed it. The `!= host_downloads_path`
-/// guard is defense in depth against a malformed `content_path` resolving
-/// to the downloads root itself; every real torrent lands in its own
-/// subdirectory or as a single file, never the root.
+/// `move_or_copy_file` already consumed it.
+///
+/// Never wipes a directory that still contains a video we didn't import
+/// (unmatched pack files), and never `remove_dir_all`s the downloads root
+/// itself — `host_downloads_path` defaults to `""`, so a raw `!= host`
+/// comparison is not enough.
 fn cleanup_leftover_download_dir(content_path: &Path, host_downloads_path: &str) -> Result<()> {
-    if content_path.is_dir() && content_path != Path::new(host_downloads_path) {
-        std::fs::remove_dir_all(content_path)?;
+    if !is_safe_cleanup_target(content_path, host_downloads_path) {
+        return Ok(());
     }
+    if dir_contains_video_files(content_path) {
+        remove_non_video_files(content_path)?;
+        return Ok(());
+    }
+    std::fs::remove_dir_all(content_path)?;
     Ok(())
 }
 
@@ -1336,7 +1477,22 @@ fn remap_path(reported: &str, container_prefix: &str, host_prefix: &str) -> Path
         return PathBuf::from(reported);
     }
     match reported.strip_prefix(container_prefix) {
-        Some(rest) => PathBuf::from(format!("{host_prefix}{rest}")),
+        Some(rest) => {
+            let rest_path = Path::new(rest);
+            if rest_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return PathBuf::from(reported);
+            }
+            let joined = PathBuf::from(format!("{host_prefix}{rest}"));
+            let normalized = normalize_lexically(&joined);
+            let host = normalize_lexically(Path::new(host_prefix));
+            if !normalized.starts_with(&host) {
+                return PathBuf::from(reported);
+            }
+            normalized
+        }
         None => PathBuf::from(reported),
     }
 }
@@ -1423,17 +1579,13 @@ fn process_pending_grabs(
     transcode_cfg: Option<&breadarr_shared::config::TranscodeConfig>,
 ) -> Result<(ImportStats, Vec<(String, PathBuf)>)> {
     let mut stats = ImportStats::default();
-    // Torrents whose data has been fully dealt with this cycle — moved into
-    // the library, or deleted outright because a better file already existed
-    // (see `ImportOutcome::SkippedAlreadyHaveBetter`, whose only producer,
-    // `import_one`, deletes the losing download itself). Either way nothing
-    // *breadarr still needs* remains at the torrent's original location, so
-    // the caller (`run_import_cycle`, the async I/O boundary this function is
-    // deliberately kept free of) removes each from qBittorrent afterward and
-    // clears out whatever's left of `content_path` — a multi-file release
-    // only ever has its video moved out by `move_or_copy_file`, so without
-    // this the surrounding folder (sample clips, .nfo/.srt/.jpg sidecars)
-    // sits there forever with no torrent left to account for it.
+    // Torrents whose data has been fully dealt with this cycle — imported,
+    // skipped as already-better, or given up on (stall / missing past grace
+    // / MAX_IMPORT_ERRORS). The caller (`run_import_cycle`) removes each
+    // from qBittorrent afterward and runs leftover-dir cleanup, which now
+    // refuses to wipe leftover videos or the downloads root. `fail_grab`
+    // itself only writes SQLite; hashes collected here are how the torrent
+    // actually leaves qBit.
     let mut imported_hashes: Vec<(String, PathBuf)> = Vec::new();
 
     for grab in pending {
@@ -1441,6 +1593,10 @@ fn process_pending_grabs(
             if grab_missing_past_grace(conn, grab.release_id())? {
                 fail_grab(conn, grab, "torrent hash absent from qBittorrent")?;
                 stats.failed += 1;
+                // Torrent is already gone from qBit; still collect the hash
+                // so delete is attempted (best-effort) and any known path
+                // would be cleaned. No `content_path` is available here.
+                imported_hashes.push((grab.torrent_hash().to_string(), PathBuf::new()));
             }
             continue;
         };
@@ -1454,6 +1610,12 @@ fn process_pending_grabs(
                     "no progress for longer than the stall threshold",
                 )?;
                 stats.failed += 1;
+                let content_path = remap_path(
+                    &torrent.content_path,
+                    container_downloads_path,
+                    host_downloads_path,
+                );
+                imported_hashes.push((grab.torrent_hash().to_string(), content_path));
             }
             continue;
         }
@@ -1497,7 +1659,11 @@ fn process_pending_grabs(
                 Ok(outcome) => {
                     stats.imported += outcome.episodes_imported;
                     stats.quality_flagged += outcome.quality_flagged;
-                    if outcome.episodes_imported > 0 {
+                    // Imported files *or* a no-op upgrade (`upgraded` with
+                    // 0 imported): nothing breadarr still needs lives in
+                    // qBit. Unmatched leftover videos are left on disk by
+                    // `cleanup_leftover_download_dir`.
+                    if outcome.episodes_imported > 0 || outcome.episodes_already_had_better > 0 {
                         imported_hashes.push((grab.torrent_hash().to_string(), content_path.clone()));
                     }
                 }
@@ -1510,6 +1676,7 @@ fn process_pending_grabs(
                             &format!("season pack import failed {error_count} times in a row: {e}"),
                         )?;
                         stats.failed += 1;
+                        imported_hashes.push((grab.torrent_hash().to_string(), content_path.clone()));
                     } else {
                         tracing::warn!(
                             error = %e,
@@ -1553,6 +1720,7 @@ fn process_pending_grabs(
                         &format!("import failed {error_count} times in a row: {e}"),
                     )?;
                     stats.failed += 1;
+                    imported_hashes.push((grab.torrent_hash().to_string(), content_path.clone()));
                 } else {
                     tracing::warn!(
                         error = %e,
@@ -2068,6 +2236,12 @@ fn import_season_pack(
 
     std::fs::create_dir_all(root_folder)?;
 
+    let tvdb_id: Option<i64> = conn.query_row(
+        "SELECT tvdb_id FROM media_item WHERE id = ?1",
+        params![media_item_id],
+        |row| row.get(0),
+    )?;
+
     let mut outcome = SeasonPackImportOutcome::default();
     for source_path in &video_files {
         let filename_only = source_path
@@ -2075,18 +2249,24 @@ fn import_season_pack(
             .and_then(|f| f.to_str())
             .unwrap_or_default();
         let parsed = crate::parser::parse(filename_only);
-        let Some(episode_number) = parsed.episode.or(parsed.absolute_episode) else {
-            outcome.episodes_unmatched += 1;
-            tracing::warn!(
-                file = filename_only,
-                "season pack: could not determine an episode number for this file, skipping"
-            );
-            continue;
+        // Anime packs name files `[SubsPlease] Show - 15.mkv` (absolute
+        // only). Treating that as S01E15 skipped the AniDB map that
+        // `library_scan` already uses via `resolve_episode`.
+        let resolved = crate::scheduler::resolve_episode(conn, tvdb_id, &parsed)?;
+        let (file_season, episode_number) = match resolved {
+            Some(pair) => pair,
+            None => match (parsed.season, parsed.episode) {
+                (Some(season), Some(episode)) => (season, episode),
+                _ => {
+                    outcome.episodes_unmatched += 1;
+                    tracing::warn!(
+                        file = filename_only,
+                        "season pack: could not determine an episode number for this file, skipping"
+                    );
+                    continue;
+                }
+            },
         };
-        // Prefer the individual file's own season marker when it has one
-        // (a pack can occasionally mix seasons); fall back to the pack's
-        // own season otherwise.
-        let file_season = parsed.season.unwrap_or(season_number);
 
         let episode_id = match crate::scheduler::find_episode_id(
             conn,
@@ -3158,6 +3338,11 @@ mod tests {
     #[test]
     fn sanitizes_path_hostile_characters() {
         assert_eq!(sanitize("Kill: Ao / Blue?"), "Kill_ Ao _ Blue_");
+        assert_eq!(sanitize(".."), "_");
+        assert_eq!(sanitize("."), "_");
+        // Slashes become `_` first, so this is not a lone `..` component.
+        assert_eq!(sanitize("foo/../bar"), "foo_.._bar");
+        assert_eq!(sanitize("title\nwith\x00ctrl"), "title_with_ctrl");
     }
 
     #[test]
@@ -3308,6 +3493,70 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_leftover_download_dir_leaves_unmatched_videos() {
+        let downloads = std::env::temp_dir().join(format!(
+            "breadarr-cleanup-leftover-video-{}",
+            std::process::id()
+        ));
+        let release_dir = downloads.join("Some Show S01");
+        std::fs::create_dir_all(&release_dir).unwrap();
+        let unmatched = release_dir.join("Show - 15.mkv");
+        std::fs::write(&unmatched, b"unmatched video").unwrap();
+        std::fs::write(release_dir.join("release.nfo"), b"nfo").unwrap();
+        std::fs::write(release_dir.join("poster.jpg"), b"jpeg").unwrap();
+
+        cleanup_leftover_download_dir(&release_dir, &downloads.to_string_lossy()).unwrap();
+
+        assert!(
+            unmatched.exists(),
+            "an unmatched video must survive leftover-dir cleanup"
+        );
+        assert!(
+            !release_dir.join("release.nfo").exists(),
+            "sidecars next to leftover videos should still be dropped"
+        );
+        assert!(!release_dir.join("poster.jpg").exists());
+        assert!(release_dir.exists());
+
+        std::fs::remove_dir_all(&downloads).unwrap();
+    }
+
+    #[test]
+    fn cleanup_leftover_download_dir_empty_host_still_removes_a_per_torrent_folder() {
+        let downloads = std::env::temp_dir().join(format!(
+            "breadarr-cleanup-empty-host-{}",
+            std::process::id()
+        ));
+        let release_dir = downloads.join("Some Movie 2016 1080p");
+        std::fs::create_dir_all(&release_dir).unwrap();
+        std::fs::write(release_dir.join("poster.jpg"), b"jpeg").unwrap();
+
+        cleanup_leftover_download_dir(&release_dir, "").unwrap();
+
+        assert!(!release_dir.exists());
+        assert!(downloads.exists());
+
+        std::fs::remove_dir_all(&downloads).unwrap();
+    }
+
+    #[test]
+    fn cleanup_leftover_download_dir_empty_host_refuses_common_roots() {
+        cleanup_leftover_download_dir(Path::new("/"), "").unwrap();
+        assert!(Path::new("/").exists());
+
+        cleanup_leftover_download_dir(Path::new("/mnt"), "").unwrap();
+        cleanup_leftover_download_dir(Path::new("/media"), "").unwrap();
+
+        if let Some(home) = std::env::var_os("HOME") {
+            let home_path = PathBuf::from(&home);
+            if home_path.is_dir() {
+                cleanup_leftover_download_dir(&home_path, "").unwrap();
+                assert!(home_path.exists(), "must never wipe $HOME");
+            }
+        }
+    }
+
+    #[test]
     fn locates_a_single_file_torrent() {
         let dir = std::env::temp_dir().join(format!("breadarr-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3318,6 +3567,42 @@ mod tests {
         assert_eq!(found, file);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn walk_files_does_not_follow_symlinks() {
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-walk-symlink-{}",
+            std::process::id()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "breadarr-walk-outside-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(dir.join("real.mkv"), b"inside").unwrap();
+        std::fs::write(outside.join("secret.mkv"), b"escaped").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("escape")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.mkv"), dir.join("link.mkv")).unwrap();
+
+        let walked = walk_files(&dir).unwrap();
+        let names: Vec<String> = walked
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+            .collect();
+        assert!(names.contains(&"real.mkv".to_string()));
+        assert!(
+            !names.contains(&"secret.mkv".to_string()),
+            "a directory symlink must not pull files from outside the scan root"
+        );
+        assert!(
+            !names.contains(&"link.mkv".to_string()),
+            "a file symlink to a video must be skipped"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]
@@ -3337,6 +3622,31 @@ mod tests {
         assert_eq!(
             remap_path("/downloads/Big Buck Bunny", "", ""),
             PathBuf::from("/downloads/Big Buck Bunny")
+        );
+    }
+
+    #[test]
+    fn remap_path_rejects_parent_dir_escape() {
+        let remapped = remap_path(
+            "/downloads/../../etc",
+            "/downloads",
+            "/home/breadway/downloads",
+        );
+        assert_eq!(remapped, PathBuf::from("/downloads/../../etc"));
+        assert!(
+            !normalize_lexically(&remapped).starts_with("/home/breadway/downloads")
+                || remapped.as_os_str() == "/downloads/../../etc",
+            "a `..` remainder must not be rewritten under the host prefix"
+        );
+
+        let remapped = remap_path(
+            "/downloads/show/../../../etc/passwd",
+            "/downloads",
+            "/home/breadway/downloads",
+        );
+        assert_eq!(
+            remapped,
+            PathBuf::from("/downloads/show/../../../etc/passwd")
         );
     }
 
@@ -3445,12 +3755,22 @@ mod tests {
             // absent — simulating torrents qBit no longer knows about.
         ];
 
-        let (stats, _) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
+        let (stats, hashes) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
 
         assert_eq!(stats.imported, 1);
         assert_eq!(stats.skipped_incomplete, 1);
         assert_eq!(stats.failed, 1);
         assert_eq!(stats.errors, 0);
+        assert!(
+            hashes.iter().any(|(h, _)| h == "hash-complete"),
+            "a successful import must still be queued for qBit delete"
+        );
+        assert!(
+            hashes.iter().any(|(h, _)| h == "hash-missing-stale"),
+            "a grab failed for a missing torrent must be queued for qBit delete"
+        );
+        assert!(!hashes.iter().any(|(h, _)| h == "hash-downloading"));
+        assert!(!hashes.iter().any(|(h, _)| h == "hash-missing-fresh"));
 
         let statuses: Vec<(i64, String)> = {
             let mut stmt = conn
@@ -3575,9 +3895,13 @@ mod tests {
 
         // The Nth failure crosses the threshold and gives up.
         let pending = fetch_pending_grabs(&conn).unwrap();
-        let (stats, _) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
+        let (stats, hashes) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
         assert_eq!(stats.failed, 1);
         assert_eq!(stats.errors, 0);
+        assert!(
+            hashes.iter().any(|(h, _)| h == "hash-broken"),
+            "a grab failed after MAX_IMPORT_ERRORS must be queued for qBit delete"
+        );
         let status: String = conn
             .query_row("SELECT status FROM release WHERE id = 1", [], |r| r.get(0))
             .unwrap();
@@ -3586,6 +3910,51 @@ mod tests {
         // Failed releases are excluded from `fetch_pending_grabs`, so it
         // stops being retried at all.
         assert!(fetch_pending_grabs(&conn).unwrap().is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stalled_grab_is_queued_for_qbit_delete() {
+        use crate::qbit::TorrentInfo;
+
+        let (conn, release_id) = seeded_release_conn(STALL_THRESHOLD_HOURS + 1.0);
+        // Same progress already recorded — otherwise `update_grab_progress`
+        // would stamp `last_progress_at = now` and reset the stall clock.
+        conn.execute(
+            "UPDATE release SET last_seen_progress = 0.4, last_progress_at = datetime('now', ?1) WHERE id = ?2",
+            params![format!("-{} hours", STALL_THRESHOLD_HOURS + 1.0), release_id],
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-stall-delete-{}",
+            std::process::id()
+        ));
+        let content = dir.join("partial");
+        std::fs::create_dir_all(&content).unwrap();
+        std::fs::write(content.join("movie.mp4"), b"partial").unwrap();
+
+        let pending = fetch_pending_grabs(&conn).unwrap();
+        let torrents = vec![TorrentInfo {
+            hash: "deadbeef".to_string(),
+            name: "stalled".to_string(),
+            state: "downloading".to_string(),
+            progress: 0.4,
+            save_path: dir.to_string_lossy().to_string(),
+            content_path: content.to_string_lossy().to_string(),
+        }];
+
+        let (stats, hashes) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
+        assert_eq!(stats.failed, 1);
+        assert!(
+            hashes.iter().any(|(h, p)| h == "deadbeef" && p == &content),
+            "a stalled grab must be queued for qBit delete with its content_path"
+        );
+        cleanup_leftover_download_dir(&content, "").unwrap();
+        assert!(
+            content.join("movie.mp4").exists(),
+            "cleanup of a failed grab must not wipe leftover videos"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -4690,6 +5059,198 @@ mod tests {
             None,
         );
         assert!(result.is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn import_season_pack_uses_anime_absolute_mapping() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_item (id, kind, title, year, tvdb_id, monitored, quality_profile_id, root_folder)
+             VALUES (1, 'series', 'Show', 2020, 366263, 1, 1, '/tmp')",
+            [],
+        )
+        .unwrap();
+        // Bookworm-style offsets: cours starting at absolute 1/15/27/37.
+        for (anidb_id, offset) in [(1, 0), (2, 14), (3, 26), (4, 36)] {
+            conn.execute(
+                "INSERT INTO anime_mapping (anidb_id, tvdb_id, season_offset, episode_offset)
+                 VALUES (?1, 366263, 1, ?2)",
+                params![anidb_id, offset],
+            )
+            .unwrap();
+        }
+        // Mapped landing spot for absolute 15 (offset 14 → S01E01).
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file)
+             VALUES (1, 1, 1, 1, 1, 0)",
+            [],
+        )
+        .unwrap();
+        // Naive S01E15 — must not be chosen over the mapped episode.
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file)
+             VALUES (15, 1, 1, 15, 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source (id, name, kind, base_url) VALUES (1, 'tpb', 'scrape', 'http://x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO release (id, media_item_id, episode_id, season_number, raw_title, source_id, guid, score, status, torrent_hash, grabbed_at)
+             VALUES (1, 1, NULL, 1, '[SubsPlease] Show (01-12)', 1, 'guid-1', 15.0, 'grabbed', 'aaaa', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-season-pack-anime-{}",
+            std::process::id()
+        ));
+        let pack_dir = dir.join("pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(pack_dir.join("[SubsPlease] Show - 15.mkv"), b"abs 15").unwrap();
+        let dest_root = dir.join("library");
+
+        let outcome = import_season_pack(
+            &conn,
+            1,
+            1,
+            "Show",
+            1,
+            &dest_root.to_string_lossy(),
+            &pack_dir,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.episodes_imported, 1);
+        assert_eq!(outcome.episodes_unmatched, 0);
+
+        let (has_mapped, has_naive): (i64, i64) = conn
+            .query_row(
+                "SELECT
+                    (SELECT has_file FROM episode WHERE id = 1),
+                    (SELECT has_file FROM episode WHERE id = 15)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(has_mapped, 1, "absolute 15 must land on mapped S01E01");
+        assert_eq!(has_naive, 0, "must not treat absolute 15 as S01E15");
+        assert!(dest_root.join("Season 01").join("Show - S01E01.mkv").exists());
+        assert!(!dest_root.join("Season 01").join("Show - S01E15.mkv").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn import_season_pack_cleanup_preserves_unmatched_videos() {
+        let conn = seeded_season_pack_conn(1);
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-season-pack-leftover-{}",
+            std::process::id()
+        ));
+        let pack_dir = dir.join("pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(pack_dir.join("Show.S01E01.mkv"), b"matched").unwrap();
+        let unmatched = pack_dir.join("Show - 15.mkv");
+        std::fs::write(&unmatched, b"did not parse as SxxExx").unwrap();
+        std::fs::write(pack_dir.join("release.nfo"), b"nfo").unwrap();
+        let dest_root = dir.join("library");
+
+        let outcome = import_season_pack(
+            &conn,
+            1,
+            1,
+            "Some Show",
+            1,
+            &dest_root.to_string_lossy(),
+            &pack_dir,
+            None,
+        )
+        .unwrap();
+        assert_eq!(outcome.episodes_imported, 1);
+        assert_eq!(outcome.episodes_unmatched, 1);
+
+        cleanup_leftover_download_dir(&pack_dir, &dir.to_string_lossy()).unwrap();
+
+        assert!(
+            unmatched.exists(),
+            "unmatched pack video must survive leftover-dir cleanup"
+        );
+        assert!(
+            dest_root
+                .join("Season 01")
+                .join("Some Show - S01E01.mkv")
+                .exists()
+        );
+        assert!(!pack_dir.join("release.nfo").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn process_pending_grabs_queues_a_noop_season_pack_upgrade_for_qbit_delete() {
+        use crate::qbit::TorrentInfo;
+
+        let conn = seeded_season_pack_conn(1);
+        let dir = std::env::temp_dir().join(format!(
+            "breadarr-season-pack-noop-upgrade-{}",
+            std::process::id()
+        ));
+        let pack_dir = dir.join("pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(pack_dir.join("Show.S01E01.mkv"), b"new e01").unwrap();
+        let dest_root = dir.join("library");
+        let season = dest_root.join("Season 01");
+        std::fs::create_dir_all(&season).unwrap();
+        let existing = season.join("Some Show - S01E01.mkv");
+        std::fs::write(&existing, b"already-better").unwrap();
+        conn.execute(
+            "INSERT INTO release (id, media_item_id, episode_id, raw_title, source_id, guid, score, status, torrent_hash, grabbed_at)
+             VALUES (2, 1, 1, 'Some Show S01E01 REMUX', 1, 'guid-2', 50.0, 'imported', 'bbbb', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO episode_file (episode_id, media_item_id, path, size_bytes, subtitle_status)
+             VALUES (1, NULL, ?1, 14, 'none')",
+            params![existing.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE media_item SET root_folder = ?1 WHERE id = 1",
+            params![dest_root.to_string_lossy()],
+        )
+        .unwrap();
+
+        let pending = fetch_pending_grabs(&conn).unwrap();
+        let torrents = vec![TorrentInfo {
+            hash: "aaaa".to_string(),
+            name: "pack".to_string(),
+            state: "uploading".to_string(),
+            progress: 1.0,
+            save_path: dir.to_string_lossy().to_string(),
+            content_path: pack_dir.to_string_lossy().to_string(),
+        }];
+
+        let (stats, hashes) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
+        assert_eq!(stats.imported, 0);
+        assert_eq!(stats.failed, 0);
+        let status: String = conn
+            .query_row("SELECT status FROM release WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "upgraded");
+        assert!(
+            hashes.iter().any(|(h, _)| h == "aaaa"),
+            "a no-op season-pack upgrade must still be removed from qBit"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -71,7 +71,7 @@ pub enum BackgroundRequest {
 /// Mutex` is fine here (unlike `conn`) since updates are a single field
 /// write with no `.await` in between. Exists so a silently-stalled
 /// background loop (e.g. every cycle erroring for hours) is visible from a
-/// single `/health` call instead of only in the journal.
+/// single `/health/detail` call instead of only in the journal.
 #[derive(Clone, Default)]
 pub struct CycleStatus {
     pub last_grab: Option<CycleRecord>,
@@ -96,10 +96,11 @@ pub struct CycleRecord {
 /// Rejects any request lacking `Authorization: Bearer <config.daemon.api_token>`
 /// once a token is actually configured — a no-op (every request passes)
 /// when it's empty, so an unconfigured install behaves exactly as before.
-/// `/health` is deliberately exempt even with a token configured: it's
-/// commonly polled by external monitoring (e.g. an uptime dashboard) that
-/// has no reason to hold the same credential as the TUI/API client, and it
-/// exposes nothing more sensitive than "is the process alive."
+/// Exact `/health` is deliberately exempt even with a token configured:
+/// it's commonly polled by external monitoring (e.g. an uptime dashboard)
+/// that has no reason to hold the same credential as the TUI/API client,
+/// and it exposes nothing more sensitive than "is the process alive."
+/// `/health/detail` is *not* exempt — it includes cycle status.
 async fn require_api_token(State(state): State<AppState>, req: Request, next: Next) -> Response {
     if state.config.daemon.api_token.is_empty() || req.uri().path() == "/health" {
         return next.run(req).await;
@@ -118,21 +119,27 @@ async fn require_api_token(State(state): State<AppState>, req: Request, next: Ne
 
 /// Byte-wise `==` short-circuits on the first mismatching byte, making
 /// comparison time a (weak, but real) signal of how many leading bytes of a
-/// guessed token were correct — a classic timing oracle. This always
-/// touches every byte of the shorter input regardless of where they first
-/// differ. Real-world exposure here is low (loopback-bound by default, a
-/// personal single-user daemon), but it costs nothing to close.
+/// guessed token were correct — a classic timing oracle. This always walks
+/// the longer input (padding the shorter against a dummy) and folds a
+/// length mismatch into the accumulator so a length difference is not a
+/// first-instruction return. Pair with `api_token.len() >= 16` in
+/// `Config::validate` so a length-oracle of short guesses is useless.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
+    let max = a.len().max(b.len());
+    let mut acc = u8::from(a.len() != b.len());
+    for i in 0..max {
+        let x = *a.get(i).unwrap_or(&0);
+        let y = *b.get(i).unwrap_or(&0);
+        acc |= x ^ y;
     }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    acc == 0
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(routes::health::health))
+        .route("/health/detail", get(routes::health::health_detail))
         .route("/media", get(routes::media::list).post(routes::media::add))
         .route(
             "/media/:id",

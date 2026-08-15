@@ -82,7 +82,8 @@ Host tools the daemon shells out to: `mkvtoolnix-cli` (`mkvmerge`) and
 
 ## CI
 
-- `check.yml` — clippy + test on push to `feature/**` and `fix/**`.
+- `check.yml` — clippy + test on push to `feature/**`, `fix/**`, and
+  `main`, and on pull requests.
 - `dev-release.yml` — triggered on push to `main`.
 - `rc-release.yml` — triggered on any `vX.Y.Z-rc.N` tag push.
 - `release.yml` — triggered on any other `v*` tag push, cuts the actual

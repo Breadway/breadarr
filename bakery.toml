@@ -14,17 +14,17 @@ binaries = ["breadarrd", "breadarr-tui"]
 # on the built binary is full of onnxruntime's own C++ symbol names --
 # confirming the `ort` crate's default strategy statically bundled its own
 # onnxruntime build directly into breadarrd rather than dynamically linking
-# the system onnxruntime-cpu package. openssl: libssl.so.3/libcrypto.so.3
-# (reqwest's TLS backend) show up directly in `ldd` for both breadarrd and
-# breadarr-tui. libstdc++/libgcc/glibc/zlib/zstd/brotli also appear in
-# `ldd` but are omitted here the same way breadcast's bakery.toml omits
-# them: glibc/gcc-libs are unavoidable base-system dependencies, and
-# zlib/zstd/brotli are themselves transitive deps of openssl/curl/pacman
-# already guaranteed present on any real Arch install.
+# the system onnxruntime-cpu package. TLS is vendored: breadarrd builds
+# OpenSSL via openssl-sys's `vendored` feature, so the shipped binary does
+# not depend on the host's libssl/libcrypto. libstdc++/libgcc/glibc/zlib/
+# zstd/brotli also appear in `ldd` but are omitted here the same way
+# breadcast's bakery.toml omits them: glibc/gcc-libs are unavoidable
+# base-system dependencies, and zlib/zstd/brotli are themselves
+# transitive deps of curl/pacman already guaranteed present on any real
+# Arch install.
 system_deps = [
     "mkvtoolnix-cli",
     "ffmpeg",
-    "openssl",
 ]
 optional_system_deps = []
 bread_deps = []
@@ -40,5 +40,6 @@ example = "config.example.toml"
 
 [install]
 post_install = [
+    "loginctl enable-linger \"$USER\" || true",
     "systemctl --user is-active --quiet breadarrd || systemctl --user start breadarrd",
 ]

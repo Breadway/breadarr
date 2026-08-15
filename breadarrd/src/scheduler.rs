@@ -194,13 +194,7 @@ fn movie_needs_grab(conn: &Connection, media_item_id: i64) -> Result<bool> {
     if has_file > 0 {
         return Ok(false);
     }
-    let in_flight: i64 = conn.query_row(
-        "SELECT count(*) FROM release WHERE media_item_id = ?1 AND episode_id IS NULL
-         AND status IN ('grabbed','downloading')",
-        params![media_item_id],
-        |row| row.get(0),
-    )?;
-    Ok(in_flight == 0)
+    Ok(!movie_has_in_flight_release(conn, media_item_id)?)
 }
 
 /// Upgrade-search counterpart to `movie_needs_grab`: same monitored/
@@ -216,13 +210,7 @@ fn movie_eligible_for_upgrade(conn: &Connection, media_item_id: i64) -> Result<b
     if monitored == 0 {
         return Ok(false);
     }
-    let in_flight: i64 = conn.query_row(
-        "SELECT count(*) FROM release WHERE media_item_id = ?1 AND episode_id IS NULL
-         AND status IN ('grabbed','downloading')",
-        params![media_item_id],
-        |row| row.get(0),
-    )?;
-    if in_flight > 0 {
+    if movie_has_in_flight_release(conn, media_item_id)? {
         return Ok(false);
     }
     // Same reasoning as the `upgrade_locked` check in
@@ -236,8 +224,50 @@ fn movie_eligible_for_upgrade(conn: &Connection, media_item_id: i64) -> Result<b
             params![media_item_id],
             |row| row.get(0),
         )
+        .optional()?
         .unwrap_or(0);
     Ok(upgrade_locked == 0)
+}
+
+fn movie_has_in_flight_release(conn: &Connection, media_item_id: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM release WHERE media_item_id = ?1 AND episode_id IS NULL
+         AND status IN ('grabbed','downloading')",
+        params![media_item_id],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn episode_has_in_flight_release(conn: &Connection, episode_id: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM release WHERE episode_id = ?1 AND status IN ('grabbed','downloading')",
+        params![episode_id],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn season_pack_in_flight(conn: &Connection, media_item_id: i64, season: u32) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM release WHERE media_item_id = ?1 AND episode_id IS NULL
+         AND season_number = ?2 AND status IN ('grabbed','downloading')",
+        params![media_item_id, season],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// True when this episode already has a grabbed/downloading release, or a
+/// season pack covering this season is already in flight.
+fn episode_is_in_flight(
+    conn: &Connection,
+    media_item_id: i64,
+    episode_id: i64,
+    season: u32,
+) -> Result<bool> {
+    Ok(episode_has_in_flight_release(conn, episode_id)?
+        || season_pack_in_flight(conn, media_item_id, season)?)
 }
 
 fn is_anime(conn: &Connection, tvdb_id: i64) -> Result<bool> {
@@ -295,14 +325,21 @@ fn find_monitored_missing_episode(
     season: u32,
     episode: u32,
 ) -> Result<Option<i64>> {
-    conn.query_row(
-        "SELECT id FROM episode WHERE media_item_id = ?1 AND season_number = ?2
-         AND episode_number = ?3 AND monitored = 1 AND has_file = 0",
-        params![media_item_id, season, episode],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM episode WHERE media_item_id = ?1 AND season_number = ?2
+             AND episode_number = ?3 AND monitored = 1 AND has_file = 0",
+            params![media_item_id, season, episode],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    if episode_is_in_flight(conn, media_item_id, id, season)? {
+        return Ok(None);
+    }
+    Ok(Some(id))
 }
 
 /// Upgrade-search counterpart to `find_monitored_missing_episode`: same
@@ -336,8 +373,14 @@ fn count_monitored_missing_episodes_in_season(
     season: u32,
 ) -> Result<i64> {
     conn.query_row(
-        "SELECT count(*) FROM episode WHERE media_item_id = ?1 AND season_number = ?2
-         AND monitored = 1 AND has_file = 0",
+        "SELECT count(*) FROM episode e
+         WHERE e.media_item_id = ?1 AND e.season_number = ?2
+           AND e.monitored = 1 AND e.has_file = 0
+           AND NOT EXISTS (SELECT 1 FROM release r WHERE r.episode_id = e.id
+                           AND r.status IN ('grabbed','downloading'))
+           AND NOT EXISTS (SELECT 1 FROM release r WHERE r.media_item_id = e.media_item_id
+                           AND r.episode_id IS NULL AND r.season_number = e.season_number
+                           AND r.status IN ('grabbed','downloading'))",
         params![media_item_id, season],
         |row| row.get(0),
     )
@@ -400,6 +443,14 @@ fn best_existing_season_pack_score(
 /// an upgrade-search grab (see `SearchTarget::upgrade_min_gain`), so a file
 /// already on disk isn't replaced over and over for score deltas too small
 /// to matter.
+/// Upgrade-search may auto-grab a better copy of something already owned.
+/// The review-queue approve handler cannot — it only runs the first-copy
+/// checks — so a NeedsReview match on an upgrade cycle must use those
+/// same first-copy checks or the TUI's `a` key 409s every time.
+fn use_upgrade_eligibility(upgrade_min_gain: Option<f32>, needs_review: bool) -> bool {
+    upgrade_min_gain.is_some() && !needs_review
+}
+
 fn should_grab(new_score: f32, is_repack: bool, existing_best: Option<f32>, min_gain: f32) -> bool {
     match existing_best {
         None => true,
@@ -520,9 +571,15 @@ async fn process_item(
         if movie_year_mismatch(parsed.year, media_item.year) {
             return Ok(ProcessOutcome::YearMismatch);
         }
-        let eligible = match upgrade_min_gain {
-            Some(_) => movie_eligible_for_upgrade(conn, media_item.id)?,
-            None => movie_needs_grab(conn, media_item.id)?,
+        // Review-queue approval only implements the first-copy path
+        // (`movie_needs_grab`). An upgrade-cycle match that still needs a
+        // human would otherwise be queued and then 409 on approve — the
+        // live hestia queue was 139 already-owned movies for exactly this
+        // reason. High-confidence auto-matches still use upgrade eligibility.
+        let eligible = if use_upgrade_eligibility(upgrade_min_gain, needs_review) {
+            movie_eligible_for_upgrade(conn, media_item.id)?
+        } else {
+            movie_needs_grab(conn, media_item.id)?
         };
         if !eligible {
             return Ok(ProcessOutcome::NotMonitoredOrAlreadyHave);
@@ -539,9 +596,10 @@ async fn process_item(
         let Some((season, episode)) = resolve_episode(conn, media_item.tvdb_id, &parsed)? else {
             return Ok(ProcessOutcome::CouldNotResolveEpisode);
         };
-        let eid_opt = match upgrade_min_gain {
-            Some(_) => find_monitored_episode(conn, media_item.id, season, episode)?,
-            None => find_monitored_missing_episode(conn, media_item.id, season, episode)?,
+        let eid_opt = if use_upgrade_eligibility(upgrade_min_gain, needs_review) {
+            find_monitored_episode(conn, media_item.id, season, episode)?
+        } else {
+            find_monitored_missing_episode(conn, media_item.id, season, episode)?
         };
         let Some(eid) = eid_opt else {
             return Ok(ProcessOutcome::NotMonitoredOrAlreadyHave);
@@ -594,7 +652,7 @@ async fn process_item(
         return Ok(ProcessOutcome::QueuedForReview);
     }
 
-    let release_score = scoring::score(&parsed, item.seeders.unwrap_or(0), false, &profile);
+    let release_score = scoring::score(&parsed, item.seeders.unwrap_or(0), parsed.has_hdr, &profile);
     let existing_best = match (episode_id, season_pack_number) {
         (Some(eid), _) => best_existing_score(conn, eid)?,
         (None, Some(season)) => best_existing_season_pack_score(conn, media_item.id, season)?,
@@ -898,6 +956,11 @@ pub struct SearchTarget {
     /// satisfied this target even though it has no single `episode_id`
     /// of its own.
     season_number: Option<u32>,
+    /// The target episode's number — `None` for a movie (or a season-pack
+    /// target). Used so `better_resolution_available` only counts 1080p+
+    /// results that are actually this episode (or a pack of this season),
+    /// not a sibling's higher-res release.
+    episode_number: Option<u32>,
     query: String,
     route: SearchRoute,
     /// Significant (len >= 4, alphanumeric) lowercased words from the
@@ -940,6 +1003,29 @@ fn passes_relevance_filter(target_words: &[String], candidate_title: &str) -> bo
     }
     let lower = candidate_title.to_lowercase();
     target_words.iter().all(|w| lower.contains(w.as_str()))
+}
+
+/// True when a title-relevant item in this batch is 1080p+ *for this
+/// target* — matching S/E, or a season pack of this season. A sibling
+/// episode's 1080p must not reject this episode's only 720p option.
+/// Movies: any title-relevant 1080p+ counts.
+fn better_resolution_available(target: &SearchTarget, items: &[RawReleaseItem]) -> bool {
+    items.iter().any(|item| {
+        if !passes_relevance_filter(&target.title_words, &item.title) {
+            return false;
+        }
+        let parsed = parser::parse(&item.title);
+        if !parsed.resolution.is_some_and(|r| r >= 1080) {
+            return false;
+        }
+        if target.season_number.is_none() {
+            return true;
+        }
+        if looks_like_season_pack(&parsed) {
+            return parsed.season == target.season_number;
+        }
+        parsed.season == target.season_number && parsed.episode == target.episode_number
+    })
 }
 
 /// 1337x's search chokes on punctuation (colons, apostrophes) — replace
@@ -1035,6 +1121,9 @@ fn enumerate_search_targets(conn: &Connection, budget: usize) -> Result<Vec<Sear
                 (SELECT tvdb_id FROM anime_mapping WHERE tvdb_id IS NOT NULL))
            AND NOT EXISTS (SELECT 1 FROM release r WHERE r.episode_id = e.id
                            AND r.status IN ('grabbed','downloading'))
+           AND NOT EXISTS (SELECT 1 FROM release r WHERE r.media_item_id = e.media_item_id
+                           AND r.episode_id IS NULL AND r.season_number = e.season_number
+                           AND r.status IN ('grabbed','downloading'))
            AND (ss.last_searched_at IS NULL OR {})",
         DUE_CLAUSE
             .replace("last_searched_at", "ss.last_searched_at")
@@ -1077,6 +1166,7 @@ fn enumerate_search_targets(conn: &Connection, budget: usize) -> Result<Vec<Sear
                 media_item_id,
                 episode_id: Some(episode_id),
                 season_number: Some(season as u32),
+                episode_number: Some(episode as u32),
                 query: build_tv_query(&title, season, episode, SearchRoute::Tpb),
                 title_words: significant_words(&title),
                 route: SearchRoute::Tpb,
@@ -1141,6 +1231,7 @@ fn enumerate_search_targets(conn: &Connection, budget: usize) -> Result<Vec<Sear
                 media_item_id,
                 episode_id: None,
                 season_number: None,
+                episode_number: None,
                 query: build_movie_query(&title, year),
                 title_words: significant_words(&title),
                 route,
@@ -1262,6 +1353,7 @@ fn enumerate_upgrade_targets(
                 media_item_id,
                 episode_id: Some(episode_id),
                 season_number: Some(season as u32),
+                episode_number: Some(episode as u32),
                 query: build_tv_query(&title, season, episode, SearchRoute::Tpb),
                 title_words: significant_words(&title),
                 route: SearchRoute::Tpb,
@@ -1332,6 +1424,7 @@ fn enumerate_upgrade_targets(
                 media_item_id,
                 episode_id: None,
                 season_number: None,
+                episode_number: None,
                 query: build_movie_query(&title, year),
                 title_words: significant_words(&title),
                 route,
@@ -1584,6 +1677,7 @@ pub fn enumerate_search_targets_for_media_item(
             media_item_id,
             episode_id: None,
             season_number: None,
+            episode_number: None,
             query: build_movie_query(&title, year),
             title_words: significant_words(&title),
             route,
@@ -1599,6 +1693,9 @@ pub fn enumerate_search_targets_for_media_item(
            AND e.air_date IS NOT NULL AND e.air_date <= date('now')
            AND NOT EXISTS (SELECT 1 FROM release r WHERE r.episode_id = e.id
                            AND r.status IN ('grabbed','downloading'))
+           AND NOT EXISTS (SELECT 1 FROM release r WHERE r.media_item_id = e.media_item_id
+                           AND r.episode_id IS NULL AND r.season_number = e.season_number
+                           AND r.status IN ('grabbed','downloading'))
          ORDER BY e.season_number, e.episode_number",
     )?;
     let rows: Vec<(i64, String, i64, i64)> = stmt
@@ -1612,6 +1709,7 @@ pub fn enumerate_search_targets_for_media_item(
             media_item_id,
             episode_id: Some(episode_id),
             season_number: Some(season as u32),
+            episode_number: Some(episode as u32),
             query: build_tv_query(&title, season, episode, SearchRoute::Tpb),
             title_words: significant_words(&title),
             route: SearchRoute::Tpb,
@@ -1738,12 +1836,7 @@ pub async fn execute_search_targets(
         // matching `process_item` already does per-item below). Used to
         // decide whether a sub-1080p candidate is a real downgrade or the
         // only option actually available for this target.
-        let better_resolution_available = sorted.iter().any(|item| {
-            passes_relevance_filter(&target.title_words, &item.title)
-                && parser::parse(&item.title)
-                    .resolution
-                    .is_some_and(|r| r >= 1080)
-        });
+        let better_resolution_available = better_resolution_available(target, &sorted);
 
         // A query built for one target's title can surface a *different*
         // monitored show/movie in its results (1337x's search isn't tightly
@@ -1901,12 +1994,7 @@ pub async fn fetch_candidates(
     sorted.sort_by_key(|i| std::cmp::Reverse(i.seeders.unwrap_or(0)));
     sorted.truncate(MAX_RESULTS_PER_SEARCH);
 
-    let better_resolution_available = sorted.iter().any(|item| {
-        passes_relevance_filter(&target.title_words, &item.title)
-            && parser::parse(&item.title)
-                .resolution
-                .is_some_and(|r| r >= 1080)
-    });
+    let better_resolution_available = better_resolution_available(&target, &sorted);
 
     let mut candidates = Vec::new();
     for item in &sorted {
@@ -1929,7 +2017,7 @@ pub async fn fetch_candidates(
                 Some(scoring::score(
                     &parsed,
                     item.seeders.unwrap_or(0),
-                    false,
+                    parsed.has_hdr,
                     &profile,
                 )),
                 None,
@@ -1960,6 +2048,68 @@ pub async fn fetch_candidates(
     Ok(candidates)
 }
 
+/// Manual-path only: auto-grab of 1337x still needs detail-page
+/// resolution. A picked candidate must already be a magnet or `.torrent`.
+fn reject_unresolved_manual_grab_link(link: &str) -> Result<()> {
+    if sources::scrape::needs_resolution(link) {
+        anyhow::bail!("candidate must be a magnet or .torrent URL");
+    }
+    Ok(())
+}
+
+/// Binds a manual grab to the episode the title actually names, not the
+/// TUI selection. A season pack has no episode id. Caller `episode_id` is
+/// last-resort only (movies / unparsable titles).
+fn resolve_grab_episode(
+    conn: &Connection,
+    media_item: &MediaItemRow,
+    parsed: &ParsedRelease,
+    caller_episode_id: Option<i64>,
+) -> Result<Option<i64>> {
+    if looks_like_season_pack(parsed) {
+        return Ok(None);
+    }
+    if let Some((season, episode)) = resolve_episode(conn, media_item.tvdb_id, parsed)? {
+        if let Some(id) = find_episode_id(conn, media_item.id, season, episode)? {
+            return Ok(Some(id));
+        }
+        if let Some(id) = find_monitored_episode(conn, media_item.id, season, episode)? {
+            return Ok(Some(id));
+        }
+    }
+    Ok(caller_episode_id)
+}
+
+/// True when this resolved grab target already has a grabbed/downloading
+/// release (episode, covering season pack, or movie).
+fn grab_target_in_flight(
+    conn: &Connection,
+    media_item: &MediaItemRow,
+    episode_id: Option<i64>,
+    season_pack_number: Option<u32>,
+) -> Result<bool> {
+    if media_item.kind == "movie" {
+        return movie_has_in_flight_release(conn, media_item.id);
+    }
+    if let Some(season) = season_pack_number {
+        return season_pack_in_flight(conn, media_item.id, season);
+    }
+    if let Some(eid) = episode_id {
+        let season: Option<u32> = conn
+            .query_row(
+                "SELECT season_number FROM episode WHERE id = ?1",
+                params![eid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(season) = season {
+            return episode_is_in_flight(conn, media_item.id, eid, season);
+        }
+        return episode_has_in_flight_release(conn, eid);
+    }
+    Ok(false)
+}
+
 /// Grabs a specific candidate a human picked from `fetch_candidates`'
 /// output, bypassing the score-vs-existing-best `should_grab` comparison
 /// entirely — a manual pick is an explicit override, not a competing
@@ -1980,6 +2130,7 @@ pub async fn grab_candidate(
     link: &str,
     guid: &str,
 ) -> Result<()> {
+    reject_unresolved_manual_grab_link(link)?;
     let parsed = parser::parse(raw_title);
     let media_item = get_media_item(conn, media_item_id)?;
     let profile_kind = if media_item.kind == "movie" {
@@ -1993,17 +2144,19 @@ pub async fn grab_candidate(
     } else {
         None
     };
-    let final_episode_id = if season_pack_number.is_some() {
-        None
-    } else {
-        episode_id
-    };
+    // Rebind to the episode the title actually names. Picking E06 while
+    // E05 is selected still grabs E06 — the TUI selection is last-resort
+    // only (movies / unparsable titles).
+    let final_episode_id = resolve_grab_episode(conn, &media_item, &parsed, episode_id)?;
+    if grab_target_in_flight(conn, &media_item, final_episode_id, season_pack_number)? {
+        anyhow::bail!("a grab is already in flight for this episode/movie");
+    }
     // Real-time seeder data isn't available for a candidate picked from an
     // earlier fetch — same `seeders=0` fallback `finalize_review_approval`
     // already uses for the same reason, and for the same reason it's still
     // real signal from resolution/source/codec/etc., not a meaningless
     // hardcoded score.
-    let score = scoring::score(&parsed, 0, false, &profile);
+    let score = scoring::score(&parsed, 0, parsed.has_hdr, &profile);
 
     let torrent_hash = match grab_and_capture_hash(qbit, link, qbit_category).await {
         Ok(hash) => hash,
@@ -2144,7 +2297,7 @@ pub fn prepare_review_approval(conn: &Connection, review_id: i64) -> Result<Appr
         ProfileKind::Tv
     };
     let profile = load_quality_profile(conn, media_item.quality_profile_id, profile_kind)?;
-    let score = scoring::score(&parsed, 0, false, &profile);
+    let score = scoring::score(&parsed, 0, parsed.has_hdr, &profile);
 
     // Claimed atomically here, still under the caller's DB lock — a real
     // TOCTOU otherwise: the caller only checked `status == "pending"` above
@@ -2254,17 +2407,25 @@ pub fn finalize_review_approval(
     Ok(())
 }
 
-pub fn reject_review(conn: &Connection, review_id: i64) -> Result<()> {
-    conn.execute(
+pub fn reject_review(conn: &Connection, review_id: i64) -> Result<bool> {
+    let rows = conn.execute(
         "UPDATE review_queue SET status = 'rejected' WHERE id = ?1 AND status = 'pending'",
         params![review_id],
     )?;
-    Ok(())
+    Ok(rows > 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrade_cycle_does_not_use_upgrade_eligibility_for_a_review_match() {
+        assert!(!use_upgrade_eligibility(Some(5.0), true));
+        assert!(use_upgrade_eligibility(Some(5.0), false));
+        assert!(!use_upgrade_eligibility(None, false));
+        assert!(!use_upgrade_eligibility(None, true));
+    }
 
     #[test]
     fn should_grab_when_nothing_exists_yet() {
@@ -3316,5 +3477,247 @@ mod tests {
     fn relevance_filter_lets_everything_through_for_titles_with_no_significant_words() {
         // e.g. a title that's entirely short/common words after filtering
         assert!(passes_relevance_filter(&[], "anything at all"));
+    }
+
+    fn raw_item(title: &str) -> RawReleaseItem {
+        RawReleaseItem {
+            title: title.into(),
+            link: String::new(),
+            guid: title.into(),
+            size_bytes: None,
+            seeders: Some(10),
+            leechers: None,
+        }
+    }
+
+    fn tv_search_target(season: u32, episode: u32) -> SearchTarget {
+        SearchTarget {
+            media_item_id: 1,
+            episode_id: Some(i64::from(episode)),
+            season_number: Some(season),
+            episode_number: Some(episode),
+            query: "Some Show".into(),
+            route: SearchRoute::Tpb,
+            title_words: significant_words("Some Show"),
+            upgrade_min_gain: None,
+        }
+    }
+
+    #[test]
+    fn better_resolution_available_ignores_a_sibling_episodes_1080p() {
+        let target = tv_search_target(1, 1);
+        let items = [
+            raw_item("Some Show S01E01 720p WEB-DL H264"),
+            raw_item("Some Show S01E02 1080p WEB-DL H264"),
+        ];
+        let flag = better_resolution_available(&target, &items);
+        assert!(
+            !flag,
+            "E02's 1080p must not count as a better option for E01"
+        );
+        let parsed = parser::parse("Some Show S01E01 720p WEB-DL H264");
+        let ctx = GateContext {
+            seeders: Some(50),
+            size_bytes: Some(400_000_000),
+            runtime_minutes: Some(24),
+            has_english_audio: true,
+            is_anime: false,
+            better_resolution_available: flag,
+            is_season_pack: false,
+        };
+        assert_eq!(
+            scoring::evaluate_gates(&parsed, &ctx, &QualityProfile::default_tv()),
+            scoring::GateResult::Accept
+        );
+    }
+
+    #[test]
+    fn better_resolution_available_is_true_for_this_episodes_own_1080p() {
+        let target = tv_search_target(1, 1);
+        let items = [
+            raw_item("Some Show S01E01 720p WEB-DL"),
+            raw_item("Some Show S01E01 1080p WEB-DL"),
+        ];
+        assert!(better_resolution_available(&target, &items));
+    }
+
+    #[test]
+    fn better_resolution_available_counts_a_season_pack_of_this_season() {
+        let target = tv_search_target(1, 1);
+        let items = [
+            raw_item("Some Show S01E01 720p WEB-DL"),
+            raw_item("Some Show S01 Complete 1080p WEB-DL"),
+        ];
+        assert!(better_resolution_available(&target, &items));
+    }
+
+    #[test]
+    fn better_resolution_available_for_a_movie_accepts_any_title_relevant_1080p() {
+        let target = SearchTarget {
+            media_item_id: 1,
+            episode_id: None,
+            season_number: None,
+            episode_number: None,
+            query: "Some Movie".into(),
+            route: SearchRoute::Tpb,
+            title_words: significant_words("Some Movie"),
+            upgrade_min_gain: None,
+        };
+        let items = [raw_item("Some Movie 2024 1080p BluRay")];
+        assert!(better_resolution_available(&target, &items));
+    }
+
+    fn seeded_e05_e06_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_item (id, kind, title, tvdb_id, monitored, quality_profile_id, root_folder)
+             VALUES (1, 'series', 'Show', 12345, 1, 1, '/tmp')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file)
+             VALUES (5, 1, 1, 5, 1, 0), (6, 1, 1, 6, 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn resolve_grab_episode_rebinds_to_the_parsed_episode_not_the_tui_selection() {
+        let conn = seeded_e05_e06_conn();
+        let media_item = get_media_item(&conn, 1).unwrap();
+        let parsed = parser::parse("Show.S01E06.1080p");
+        let bound = resolve_grab_episode(&conn, &media_item, &parsed, Some(5)).unwrap();
+        assert_eq!(bound, Some(6));
+    }
+
+    #[test]
+    fn resolve_grab_episode_clears_episode_id_for_a_season_pack() {
+        let conn = seeded_e05_e06_conn();
+        let media_item = get_media_item(&conn, 1).unwrap();
+        let parsed = parser::parse("Show.S01.COMPLETE.1080p");
+        let bound = resolve_grab_episode(&conn, &media_item, &parsed, Some(5)).unwrap();
+        assert_eq!(bound, None);
+    }
+
+    #[test]
+    fn resolve_grab_episode_keeps_caller_id_when_the_title_does_not_resolve() {
+        let conn = seeded_e05_e06_conn();
+        let media_item = get_media_item(&conn, 1).unwrap();
+        let parsed = parser::parse("Show.1080p.WEB-DL");
+        let bound = resolve_grab_episode(&conn, &media_item, &parsed, Some(5)).unwrap();
+        assert_eq!(bound, Some(5));
+    }
+
+    fn insert_test_source(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO source (id, name, kind, base_url) VALUES (1, 'test', 'scrape', 'http://x')",
+            [],
+        )
+        .ok();
+    }
+
+    #[test]
+    fn find_monitored_missing_episode_excludes_an_in_flight_release() {
+        let conn = seeded_conn();
+        insert_test_source(&conn);
+        let episode_id = find_monitored_missing_episode(&conn, 1, 1, 1)
+            .unwrap()
+            .expect("seeded E01 should be missing");
+        conn.execute(
+            "INSERT INTO release (media_item_id, episode_id, raw_title, source_id, guid, status, grabbed_at)
+             VALUES (1, ?1, 'Show S01E01', 1, 'guid-ep', 'grabbed', datetime('now'))",
+            params![episode_id],
+        )
+        .unwrap();
+        assert!(find_monitored_missing_episode(&conn, 1, 1, 1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn find_monitored_missing_episode_excludes_an_in_flight_season_pack() {
+        let conn = seeded_conn();
+        insert_test_source(&conn);
+        conn.execute(
+            "INSERT INTO release (media_item_id, episode_id, season_number, raw_title, source_id, guid, status, grabbed_at)
+             VALUES (1, NULL, 1, 'Show S01 Complete', 1, 'guid-pack', 'downloading', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        assert!(find_monitored_missing_episode(&conn, 1, 1, 1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn enumerate_search_targets_excludes_episodes_covered_by_an_in_flight_pack() {
+        let conn = search_enumeration_conn();
+        // E01 is the only aired missing episode of media_item 1 that isn't
+        // already in-flight. Cover the season with a pack and it must drop
+        // out of search enum along with any sibling.
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file, air_date)
+             VALUES (10, 1, 1, 10, 1, 0, '2020-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO release (media_item_id, episode_id, season_number, raw_title, source_id, guid, status, grabbed_at)
+             VALUES (1, NULL, 1, 'Some Show S01 Complete', 1, 'guid-pack', 'grabbed', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let targets = enumerate_search_targets(&conn, 100).unwrap();
+        assert!(
+            !targets.iter().any(|t| t.media_item_id == 1),
+            "in-flight season pack should hide every missing episode of that season"
+        );
+    }
+
+    #[test]
+    fn grab_target_in_flight_is_true_for_an_episode_with_a_grabbed_release() {
+        let conn = seeded_e05_e06_conn();
+        insert_test_source(&conn);
+        conn.execute(
+            "INSERT INTO release (media_item_id, episode_id, raw_title, source_id, guid, status, grabbed_at)
+             VALUES (1, 6, 'Show S01E06', 1, 'guid-e06', 'grabbed', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let media_item = get_media_item(&conn, 1).unwrap();
+        assert!(grab_target_in_flight(&conn, &media_item, Some(6), None).unwrap());
+        assert!(!grab_target_in_flight(&conn, &media_item, Some(5), None).unwrap());
+    }
+
+    #[test]
+    fn grab_target_in_flight_is_true_when_a_season_pack_is_already_downloading() {
+        let conn = seeded_e05_e06_conn();
+        insert_test_source(&conn);
+        conn.execute(
+            "INSERT INTO release (media_item_id, episode_id, season_number, raw_title, source_id, guid, status, grabbed_at)
+             VALUES (1, NULL, 1, 'Show S01 Complete', 1, 'guid-pack', 'downloading', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let media_item = get_media_item(&conn, 1).unwrap();
+        assert!(grab_target_in_flight(&conn, &media_item, Some(5), None).unwrap());
+        assert!(grab_target_in_flight(&conn, &media_item, None, Some(1)).unwrap());
+    }
+
+    #[test]
+    fn reject_unresolved_manual_grab_link_allows_magnet_and_torrent_only() {
+        assert!(reject_unresolved_manual_grab_link("magnet:?xt=urn:btih:deadbeef").is_ok());
+        assert!(reject_unresolved_manual_grab_link("https://example.invalid/file.torrent").is_ok());
+        let err = reject_unresolved_manual_grab_link("https://1337x.to/torrent/123/")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("magnet or .torrent URL"),
+            "unexpected error: {err}"
+        );
     }
 }

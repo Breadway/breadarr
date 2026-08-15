@@ -4,7 +4,8 @@ name: check
 # main and triggers a dev-track release build.
 on:
   push:
-    branches: ['feature/**', 'fix/**']
+    branches: ['feature/**', 'fix/**', 'main']
+  pull_request:
 
 jobs:
   check:

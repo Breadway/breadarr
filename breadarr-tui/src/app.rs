@@ -1,8 +1,8 @@
 use anyhow::Result;
 use breadarr_shared::dto::{
     CalendarEntry, HealthDetail, LibraryHealthReport, MediaItemDetail, MediaItemSummary,
-    QualityProfileSummary, ReleaseCandidate, ReleaseSummary, ReviewQueueEntry, SearchResult,
-    StuckReport, WeightsDto,
+    QualityProfileSummary, ReleaseCandidate, ReleaseSummary, ReviewQueueEntry, SearchNowResult,
+    SearchResult, StuckReport, WeightsDto,
 };
 use breadarr_shared::DaemonClient;
 use ratatui::widgets::ListState;
@@ -30,6 +30,13 @@ fn item_root_folder(root: &str, title: &str, year: Option<i64>) -> String {
         .chars()
         .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
         .collect();
+    // `.` / `..` survive the character class above and would make
+    // `root.join(...)` walk out of the library root.
+    let sanitized = if sanitized == "." || sanitized == ".." {
+        "_".to_string()
+    } else {
+        sanitized
+    };
     let folder_name = match year {
         Some(y) => format!("{sanitized} ({y})"),
         None => sanitized,
@@ -230,6 +237,16 @@ pub struct AddResult {
     pub result: SearchResult,
 }
 
+/// Result of a long `DaemonClient` call spawned off the draw loop so
+/// `search_now` / candidate fetch (up to 600s) cannot freeze key handling.
+enum BackgroundOutcome {
+    SearchNow(Result<SearchNowResult>),
+    Candidates {
+        episode_id: Option<i64>,
+        result: Result<Vec<ReleaseCandidate>>,
+    },
+}
+
 pub struct App {
     pub client: DaemonClient,
     pub daemon_up: bool,
@@ -306,6 +323,10 @@ pub struct App {
     pub profile_weight_state: ListState,
     /// In-progress digits while `Focus::WeightInput` is active.
     pub weight_input_buffer: String,
+
+    /// True while a long search-now / candidate-fetch task is in flight.
+    pub busy: bool,
+    background: Option<tokio::task::JoinHandle<BackgroundOutcome>>,
 }
 
 impl App {
@@ -350,6 +371,52 @@ impl App {
             profile_detail: None,
             profile_weight_state: ListState::default(),
             weight_input_buffer: String::new(),
+            busy: false,
+            background: None,
+        }
+    }
+
+    /// Applies a finished background search/candidate task. Only `.await`s
+    /// a handle that `is_finished()`, so the draw loop stays responsive.
+    pub async fn poll_background(&mut self) {
+        let Some(handle) = &self.background else {
+            return;
+        };
+        if !handle.is_finished() {
+            return;
+        }
+        let handle = self.background.take().expect("just checked is_finished");
+        self.busy = false;
+        match handle.await {
+            Ok(BackgroundOutcome::SearchNow(Ok(stats))) => {
+                self.status = format!(
+                    "search complete: {} target(s), {} grabbed, {} error(s)",
+                    stats.targets, stats.grabbed, stats.errors
+                );
+            }
+            Ok(BackgroundOutcome::SearchNow(Err(e))) => {
+                self.status = format!("search failed: {e}");
+            }
+            Ok(BackgroundOutcome::Candidates {
+                episode_id,
+                result: Ok(candidates),
+            }) => {
+                self.status = format!("{} candidate(s) found", candidates.len());
+                if matches!(self.tab, Tab::Library) && self.detail.is_some() {
+                    self.candidates_state.select(if candidates.is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    });
+                    self.candidates = candidates;
+                    self.candidates_episode_id = episode_id;
+                    self.focus = Focus::Candidates;
+                }
+            }
+            Ok(BackgroundOutcome::Candidates { result: Err(e), .. }) => {
+                self.status = format!("candidate fetch failed: {e}");
+            }
+            Err(e) => self.status = format!("background task failed: {e}"),
         }
     }
 
@@ -733,22 +800,21 @@ impl App {
 
     /// Manual "search now" for the show/movie currently open in the Library
     /// detail view — can take a while (jittered, one request per missing
-    /// item), so the status line makes that explicit rather than looking
-    /// like the UI hung.
+    /// item), so this is spawned off the draw loop and the status line
+    /// shows that work is in flight. A second press while busy is ignored.
     pub async fn search_now_selected(&mut self) {
         let Some(id) = self.detail.as_ref().map(|d| d.id) else {
             return;
         };
-        self.status = "searching now (this can take a while)...".to_string();
-        match self.client.search_now(id).await {
-            Ok(stats) => {
-                self.status = format!(
-                    "search complete: {} target(s), {} grabbed, {} error(s)",
-                    stats.targets, stats.grabbed, stats.errors
-                );
-            }
-            Err(e) => self.status = format!("search failed: {e}"),
+        if self.busy {
+            return;
         }
+        self.status = "searching now...".to_string();
+        self.busy = true;
+        let client = self.client.clone();
+        self.background = Some(tokio::spawn(async move {
+            BackgroundOutcome::SearchNow(client.search_now(id).await)
+        }));
     }
 
     /// Fetches candidates for whatever's selected in the open detail view —
@@ -771,23 +837,20 @@ impl App {
             Some(episode.id)
         };
         let media_item_id = detail.id;
-
-        self.status = "fetching candidates (this can take a while)...".to_string();
-        let result = match episode_id {
-            Some(id) => self.client.episode_candidates(id).await,
-            None => self.client.movie_candidates(media_item_id).await,
-        };
-        match result {
-            Ok(candidates) => {
-                self.status = format!("{} candidate(s) found", candidates.len());
-                self.candidates_state
-                    .select(if candidates.is_empty() { None } else { Some(0) });
-                self.candidates = candidates;
-                self.candidates_episode_id = episode_id;
-                self.focus = Focus::Candidates;
-            }
-            Err(e) => self.status = format!("candidate fetch failed: {e}"),
+        if self.busy {
+            return;
         }
+
+        self.status = "fetching candidates...".to_string();
+        self.busy = true;
+        let client = self.client.clone();
+        self.background = Some(tokio::spawn(async move {
+            let result = match episode_id {
+                Some(id) => client.episode_candidates(id).await,
+                None => client.movie_candidates(media_item_id).await,
+            };
+            BackgroundOutcome::Candidates { episode_id, result }
+        }));
     }
 
     /// Grabs whichever candidate is currently selected in the picker
@@ -1057,5 +1120,25 @@ impl App {
             }
             Err(e) => self.status = format!("error loading detail: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::item_root_folder;
+
+    #[test]
+    fn item_root_folder_replaces_dot_and_dotdot() {
+        assert_eq!(item_root_folder("/lib", "..", None), "/lib/_");
+        assert_eq!(item_root_folder("/lib", ".", None), "/lib/_");
+        assert_eq!(item_root_folder("/lib", "..", Some(2020)), "/lib/_ (2020)");
+    }
+
+    #[test]
+    fn item_root_folder_sanitizes_hostile_characters() {
+        assert_eq!(
+            item_root_folder("/lib", "Foo: Bar/Baz", Some(2020)),
+            "/lib/Foo_ Bar_Baz (2020)"
+        );
     }
 }

@@ -5,14 +5,14 @@ use rusqlite::Connection;
 /// doesn't slowly fill the disk with an ever-growing pile of copies.
 const MAX_BACKUPS: usize = 5;
 
-/// Copies the database (and its WAL/SHM sidecar files, if present — WAL
-/// mode means the real state can be split across all three) to a timestamped
-/// backup before the daemon opens it, then prunes old backups beyond
+/// Writes a consistent snapshot of the existing database to a timestamped
+/// file under `<db-dir>/backups/`, then prunes old backups beyond
 /// `MAX_BACKUPS`. A no-op if there's no existing database yet (fresh
-/// install — nothing to back up). Sonarr/Radarr back themselves up before
-/// every upgrade; breadarr has no migration framework to trigger that same
-/// moment, so this runs on every startup instead, which is a superset of
-/// the same protection.
+/// install — nothing to back up). Uses `VACUUM INTO` so WAL state is
+/// folded into one standalone file; a raw `fs::copy` of a live WAL
+/// database can be torn. Sonarr/Radarr back themselves up before every
+/// upgrade; breadarr has no migration framework to trigger that same
+/// moment, so this runs on every startup instead.
 pub fn backup_before_open(db_path: &std::path::Path) -> anyhow::Result<()> {
     if !db_path.exists() {
         return Ok(());
@@ -32,15 +32,13 @@ pub fn backup_before_open(db_path: &std::path::Path) -> anyhow::Result<()> {
     // and dedupe correctly instead of the second one silently overwriting.
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
     let dest = backup_dir.join(format!("{timestamp}-{stem}"));
-    std::fs::copy(db_path, &dest)?;
 
-    for sidecar_ext in ["-wal", "-shm"] {
-        let sidecar = std::path::PathBuf::from(format!("{}{sidecar_ext}", db_path.display()));
-        if sidecar.exists() {
-            let dest_sidecar = backup_dir.join(format!("{timestamp}-{stem}{sidecar_ext}"));
-            std::fs::copy(&sidecar, &dest_sidecar)?;
-        }
-    }
+    let src = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // Path is interpolated (VACUUM INTO does not bind `?` parameters);
+    // single quotes in the path are doubled so the SQL string stays valid.
+    let dest_sql = dest.to_string_lossy().replace('\'', "''");
+    src.execute(&format!("VACUUM INTO '{dest_sql}'"), [])?;
+    drop(src);
 
     prune_old_backups(&backup_dir, stem)?;
     Ok(())
@@ -280,9 +278,7 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_event_history_media_item
              ON event_history(media_item_id, occurred_at);
 
-         -- Placeholder profiles until Phase 6 builds real quality-scoring
-         -- weights; media_item.quality_profile_id needs something to
-         -- reference in the meantime.
+         -- Default profiles. Scoring reads these rows' `weights` on every grab.
          INSERT OR IGNORE INTO quality_profile (id, name, kind, weights)
              VALUES (1, 'Default TV', 'tv', '{}');
          INSERT OR IGNORE INTO quality_profile (id, name, kind, weights)
@@ -378,7 +374,14 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
          -- concurrently regardless of how it happened (a stray duplicate
          -- enqueue, a daemon-restart reset racing a still-alive backfill).
          CREATE UNIQUE INDEX IF NOT EXISTS idx_transcode_job_active_episode_file
-             ON transcode_job(episode_file_id) WHERE status IN ('pending','running');",
+             ON transcode_job(episode_file_id) WHERE status IN ('pending','running');
+
+         CREATE INDEX IF NOT EXISTS idx_release_status ON release(status);
+         CREATE INDEX IF NOT EXISTS idx_release_torrent_hash ON release(torrent_hash);
+         CREATE INDEX IF NOT EXISTS idx_release_episode_id ON release(episode_id);
+         CREATE INDEX IF NOT EXISTS idx_episode_file_episode_id ON episode_file(episode_id);
+         CREATE INDEX IF NOT EXISTS idx_review_queue_status ON review_queue(status);
+         CREATE INDEX IF NOT EXISTS idx_episode_air_date ON episode(air_date);",
     )?;
 
     // Progress watermark for stalled-download detection (added after the
@@ -476,6 +479,155 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
         "force_reencode",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+
+    ensure_indexes(conn)?;
+
+    Ok(())
+}
+
+fn index_exists(conn: &Connection, name: &str) -> anyhow::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+        [name],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `CREATE UNIQUE INDEX IF NOT EXISTS` still errors when existing rows
+/// violate uniqueness (IF NOT EXISTS only checks the index name). A dirty
+/// production DB must still start, so uniqueness failures warn and skip.
+fn create_unique_index_best_effort(conn: &Connection, name: &str, ddl: &str) -> bool {
+    match conn.execute(ddl, []) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(
+                index = name,
+                error = %e,
+                "skipping unique index; existing rows would violate it"
+            );
+            false
+        }
+    }
+}
+
+/// Delete extra `media_item` rows that share a non-NULL `tvdb_id`/`tmdb_id`,
+/// keeping the lowest `id`. Extras with any `episode` or `episode_file`
+/// rows are left in place — those are not safe to drop. Returns whether
+/// every duplicate group was reduced to a single row.
+fn dedupe_media_item_external_id(conn: &Connection, column: &str) -> anyhow::Result<bool> {
+    debug_assert!(column == "tvdb_id" || column == "tmdb_id");
+    let sql = format!(
+        "SELECT {column}, MIN(id) FROM media_item
+         WHERE {column} IS NOT NULL
+         GROUP BY {column}
+         HAVING COUNT(*) > 1"
+    );
+    let dupes: Vec<(i64, i64)> = {
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut safe = true;
+    let extra_sql = format!("SELECT id FROM media_item WHERE {column} = ?1 AND id != ?2");
+    for (ext_id, keep_id) in dupes {
+        let extras: Vec<i64> = {
+            let mut stmt = conn.prepare(&extra_sql)?;
+            let rows = stmt.query_map(rusqlite::params![ext_id, keep_id], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for extra_id in extras {
+            let episode_count: i64 = conn.query_row(
+                "SELECT count(*) FROM episode WHERE media_item_id = ?1",
+                [extra_id],
+                |row| row.get(0),
+            )?;
+            let file_count: i64 = conn.query_row(
+                "SELECT count(*) FROM episode_file WHERE media_item_id = ?1",
+                [extra_id],
+                |row| row.get(0),
+            )?;
+            if episode_count == 0 && file_count == 0 {
+                conn.execute("DELETE FROM media_item WHERE id = ?1", [extra_id])?;
+            } else {
+                tracing::warn!(
+                    column,
+                    ext_id,
+                    keep_id,
+                    extra_id,
+                    episode_count,
+                    file_count,
+                    "cannot safely dedupe media_item; extra row has episodes or files"
+                );
+                safe = false;
+            }
+        }
+    }
+    Ok(safe)
+}
+
+fn ensure_unique_external_id_index(
+    conn: &Connection,
+    column: &str,
+    unique_name: &str,
+    unique_ddl: &str,
+    lookup_ddl: &str,
+) -> anyhow::Result<()> {
+    let unique_ok = if dedupe_media_item_external_id(conn, column)? {
+        create_unique_index_best_effort(conn, unique_name, unique_ddl)
+    } else {
+        tracing::warn!(
+            index = unique_name,
+            column,
+            "skipping unique index; media_item still has unsafely-duplicated rows"
+        );
+        false
+    };
+    if !unique_ok && !index_exists(conn, unique_name)? {
+        conn.execute(lookup_ddl, [])?;
+    }
+    Ok(())
+}
+
+fn ensure_indexes(conn: &Connection) -> anyhow::Result<()> {
+    ensure_unique_external_id_index(
+        conn,
+        "tvdb_id",
+        "idx_media_item_tvdb",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_item_tvdb
+         ON media_item(tvdb_id) WHERE tvdb_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_media_item_tvdb_lookup ON media_item(tvdb_id)",
+    )?;
+    ensure_unique_external_id_index(
+        conn,
+        "tmdb_id",
+        "idx_media_item_tmdb",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_item_tmdb
+         ON media_item(tmdb_id) WHERE tmdb_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_media_item_tmdb_lookup ON media_item(tmdb_id)",
+    )?;
+
+    create_unique_index_best_effort(
+        conn,
+        "idx_episode_file_path",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_episode_file_path ON episode_file(path)",
+    );
+    create_unique_index_best_effort(
+        conn,
+        "idx_alias_item_text",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_item_text ON alias(media_item_id, text)",
+    );
+    create_unique_index_best_effort(
+        conn,
+        "idx_review_pending_title",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_review_pending_title
+         ON review_queue(candidate_media_item_id, raw_release_title)
+         WHERE status = 'pending'",
+    );
+    // No unique on release(source_id, guid): status can cycle and a
+    // re-grab of the same guid is legitimate. `seen_guid` already records
+    // first-seen.
 
     Ok(())
 }
@@ -640,18 +792,144 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    fn write_real_sqlite(db_path: &std::path::Path) {
+        let conn = Connection::open(db_path).unwrap();
+        init(&conn).unwrap();
+        drop(conn);
+    }
+
+    fn seed_movie(conn: &Connection, title: &str, tmdb_id: i64) -> i64 {
+        conn.execute(
+            "INSERT INTO media_item (kind, title, year, tmdb_id, monitored, quality_profile_id, root_folder)
+             VALUES ('movie', ?1, NULL, ?2, 1, 2, '/tmp')",
+            rusqlite::params![title, tmdb_id],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn init_creates_unique_and_lookup_indexes_on_a_clean_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+
+        assert!(index_exists(&conn, "idx_media_item_tvdb").unwrap());
+        assert!(index_exists(&conn, "idx_media_item_tmdb").unwrap());
+        assert!(index_exists(&conn, "idx_episode_file_path").unwrap());
+        assert!(index_exists(&conn, "idx_alias_item_text").unwrap());
+        assert!(index_exists(&conn, "idx_release_status").unwrap());
+        assert!(index_exists(&conn, "idx_release_torrent_hash").unwrap());
+        assert!(index_exists(&conn, "idx_release_episode_id").unwrap());
+        assert!(index_exists(&conn, "idx_episode_file_episode_id").unwrap());
+        assert!(index_exists(&conn, "idx_review_queue_status").unwrap());
+        assert!(index_exists(&conn, "idx_review_pending_title").unwrap());
+        assert!(index_exists(&conn, "idx_episode_air_date").unwrap());
+        assert!(!index_exists(&conn, "idx_media_item_tvdb_lookup").unwrap());
+        assert!(!index_exists(&conn, "idx_media_item_tmdb_lookup").unwrap());
+    }
+
+    #[test]
+    fn init_dedupes_empty_duplicate_tmdb_rows_and_creates_unique_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        conn.execute("DROP INDEX IF EXISTS idx_media_item_tmdb", [])
+            .unwrap();
+
+        let first = seed_movie(&conn, "A", 99);
+        seed_movie(&conn, "B", 99);
+
+        init(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM media_item WHERE tmdb_id = 99",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let kept: i64 = conn
+            .query_row("SELECT id FROM media_item WHERE tmdb_id = 99", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept, first);
+        assert!(index_exists(&conn, "idx_media_item_tmdb").unwrap());
+    }
+
+    #[test]
+    fn init_skips_tmdb_unique_index_when_duplicate_has_files() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        conn.execute("DROP INDEX IF EXISTS idx_media_item_tmdb", [])
+            .unwrap();
+
+        seed_movie(&conn, "A", 99);
+        let extra = seed_movie(&conn, "B", 99);
+        conn.execute(
+            "INSERT INTO episode_file (media_item_id, path, size_bytes, subtitle_status)
+             VALUES (?1, '/tmp/b.mkv', 1, 'none')",
+            [extra],
+        )
+        .unwrap();
+
+        init(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM media_item WHERE tmdb_id = 99",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+        assert!(!index_exists(&conn, "idx_media_item_tmdb").unwrap());
+        assert!(index_exists(&conn, "idx_media_item_tmdb_lookup").unwrap());
+    }
+
+    #[test]
+    fn init_skips_path_unique_index_when_duplicates_exist() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        conn.execute("DROP INDEX IF EXISTS idx_episode_file_path", [])
+            .unwrap();
+
+        let id = seed_movie(&conn, "A", 1);
+        for _ in 0..2 {
+            conn.execute(
+                "INSERT INTO episode_file (media_item_id, path, size_bytes, subtitle_status)
+                 VALUES (?1, '/tmp/x.mkv', 1, 'none')",
+                [id],
+            )
+            .unwrap();
+        }
+
+        init(&conn).unwrap();
+        assert!(!index_exists(&conn, "idx_episode_file_path").unwrap());
+    }
+
     #[test]
     fn backup_before_open_copies_an_existing_database() {
         let dir = std::env::temp_dir().join(format!("breadarr-backup-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("breadarr.db");
-        std::fs::write(&db_path, b"fake sqlite data").unwrap();
+        write_real_sqlite(&db_path);
 
         backup_before_open(&db_path).unwrap();
 
         let backup_dir = dir.join("backups");
-        let backups: Vec<_> = std::fs::read_dir(&backup_dir).unwrap().collect();
+        let backups: Vec<_> = std::fs::read_dir(&backup_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
         assert_eq!(backups.len(), 1, "expected exactly one backup file");
+
+        let verify = Connection::open(&backups[0]).unwrap();
+        let n: i64 = verify
+            .query_row("SELECT count(*) FROM quality_profile", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -660,9 +938,10 @@ mod tests {
     fn backup_before_open_prunes_beyond_max_backups() {
         let dir =
             std::env::temp_dir().join(format!("breadarr-backup-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("breadarr.db");
-        std::fs::write(&db_path, b"fake sqlite data").unwrap();
+        write_real_sqlite(&db_path);
 
         // One more than MAX_BACKUPS, sleeping a few ms between each so the
         // millisecond-resolution timestamp in the filename is guaranteed to

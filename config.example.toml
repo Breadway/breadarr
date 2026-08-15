@@ -12,7 +12,9 @@ model_dir = "~/.cache/breadarr/models/all-MiniLM-L6-v2"
 # Empty (default) means no auth at all. Set this if listen_addr is ever
 # changed to bind non-loopback (e.g. so a TUI on another host on the same
 # tailnet can reach it) — otherwise that's unauthenticated add/delete/search
-# access to anyone who can reach the port. /health is always exempt.
+# access to anyone who can reach the port. The API is plaintext HTTP; there
+# is no TLS. /health is always exempt (liveness only). /health/detail
+# carries cycle info and is authenticated when this token is set.
 api_token = ""
 
 [qbit]
@@ -63,7 +65,13 @@ movies_root_folder = "~/breadarr-library/Movies"
 # automatically and grabs anything matching a monitored, missing episode.
 nyaa_rss_url = "https://nyaa.si/?page=rss&c=1_2"
 grab_poll_interval_secs = 300
+# Kill switch for the passive RSS-feed grab loop (nyaa). Independent of
+# search_enabled / upgrade_enabled.
+grab_enabled = true
 import_poll_interval_secs = 60
+# Community JSON API mirror of The Pirate Bay — primary general-content
+# search source (movies + non-anime TV).
+tpb_api_url = "https://apibay.org/q.php"
 # Search-driven acquisition (movies + non-anime TV via 1337x, anime movies
 # via nyaa's search mode) — unlike the nyaa RSS feed watch above, this
 # actively queries a Cloudflare-fronted service with a ban history, so keep
@@ -102,3 +110,31 @@ torrent_1337x_mirrors = [
   "https://1337x.unblocktorrent.info",
   "https://1337x.unblocktor.xyz",
 ]
+
+# Off by default — GPU/CPU AV1 encode needs a calibration pass against
+# real content on the target hardware before it's safe unattended.
+# Defaults match breadarr-shared/src/config.rs.
+[transcode]
+enabled = false
+poll_interval_secs = 60
+vaapi_device = "/dev/dri/renderD128"
+parallelism_min = 1
+# Live-action (av1_vaapi) concurrent-stream ceiling; Jellyfin viewers
+# are subtracted from this each cycle.
+parallelism_max = 7
+# Separate CPU-bound anime (libsvtav1) ceiling.
+parallelism_max_anime = 2
+reference_bitrate_kbps = 5320
+reference_height = 1080
+av1_efficiency_factor = 0.7
+exclude_hdr = true
+exclude_min_height = 2000
+quality_live_action = 26
+# Path prefixes routed to the anime encode pipeline. Empty is a no-op.
+anime_root_folders = []
+quality_anime = 24
+anime_svtav1_preset = 10
+anime_svtav1_max_threads = 4
+min_size_reduction_pct = 0.10
+skip_below_ceiling_ratio = 0.5
+verify_sample_secs = 20.0

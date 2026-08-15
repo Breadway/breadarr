@@ -313,6 +313,9 @@ fn parse_search_results(html: &str, mirror: &str) -> Option<Vec<RawReleaseItem>>
             continue;
         }
         let detail_url = if href.starts_with("http") {
+            if !same_origin(href, mirror) {
+                continue;
+            }
             href.to_string()
         } else {
             format!("{mirror}{href}")
@@ -358,6 +361,27 @@ fn parse_search_results(html: &str, mirror: &str) -> Option<Vec<RawReleaseItem>>
     }
 
     Some(items)
+}
+
+/// Scheme+host(+port) origin of an `http(s)://...` URL. `None` if the
+/// string isn't an absolute http(s) URL with a host.
+fn url_origin(url: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("https://") {
+        ("https", r)
+    } else {
+        let r = url.strip_prefix("http://")?;
+        ("http", r)
+    };
+    let hostport = rest.split('/').next().filter(|s| !s.is_empty())?;
+    let hostport = hostport.rsplit('@').next().unwrap_or(hostport);
+    Some((scheme, hostport))
+}
+
+fn same_origin(href: &str, mirror: &str) -> bool {
+    match (url_origin(href), url_origin(mirror)) {
+        (Some((as_, ah)), Some((bs, bh))) => as_ == bs && ah.eq_ignore_ascii_case(bh),
+        _ => false,
+    }
 }
 
 fn extract_magnet(html: &str) -> Option<String> {
@@ -418,6 +442,32 @@ mod tests {
         // duplicate entries for the same release.
         assert_ne!(a[0].link, b[0].link);
         assert_eq!(a[0].guid, b[0].guid);
+    }
+
+    #[test]
+    fn drops_off_origin_absolute_hrefs_but_keeps_relative() {
+        let html = r#"
+<table class="table-list table table-responsive table-striped">
+<thead><tr><th class="coll-1 name">name</th><th class="coll-2">se</th><th class="coll-3">le</th><th class="coll-4">size</th></tr></thead>
+<tbody>
+<tr>
+<td class="coll-1 name"><a href="http://127.0.0.1/evil">Evil</a></td>
+<td class="coll-2">1</td>
+<td class="coll-3">1</td>
+<td class="coll-4">1 MB</td>
+</tr>
+<tr>
+<td class="coll-1 name"><a href="/torrent/3250239/Ok/">Good</a></td>
+<td class="coll-2">2</td>
+<td class="coll-3">2</td>
+<td class="coll-4">2 MB</td>
+</tr>
+</tbody>
+</table>"#;
+        let items = parse_search_results(html, "https://13377x.info").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Good");
+        assert_eq!(items[0].link, "https://13377x.info/torrent/3250239/Ok/");
     }
 
     #[test]

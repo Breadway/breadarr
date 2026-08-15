@@ -12,8 +12,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REV="$(cat "${ROOT}/ci/bread-ecosystem.rev")"
 
 CACHE_DIR="/tmp/bread-ecosystem-ci-${REV}"
-if [ ! -d "$CACHE_DIR" ]; then
-    rm -rf /tmp/bread-ecosystem-ci-*
+# Only create/replace this product's own pin directory. A glob rm of
+# /tmp/bread-ecosystem-ci-* races other products' mktemp clones used by
+# release-index regen.
+if [ ! -d "$CACHE_DIR/.git" ]; then
+    rm -rf "$CACHE_DIR"
     git clone https://git.breadway.dev/Breadway/bread-ecosystem.git "$CACHE_DIR"
     git -C "$CACHE_DIR" checkout --quiet "$REV"
 fi
@@ -35,6 +38,10 @@ fi
 # linked via --sysroot, sidesteps that entirely.
 GLIBC_VER="2.39-4"
 GCC_LIBS_VER="13.2.1-6"
+# Pinned to the archive.archlinux.org packages fetched above (sha256 of
+# the two .pkg.tar.zst files, not the extracted trees).
+GLIBC_SHA256="c6aef7065e0d53d700cc5ff65d4db775cb84e2f4e3912a609223ed72fb1799d4"
+GCC_LIBS_SHA256="edbb8c4772b8852fe102853a84d197253127418f50cca475feda9bbaa842a378"
 OLD_GLIBC_CACHE="/tmp/bread-ci-old-glibc-${GLIBC_VER}"
 if [ ! -d "${OLD_GLIBC_CACHE}/usr/lib" ]; then
     rm -rf "${OLD_GLIBC_CACHE}"
@@ -43,6 +50,8 @@ if [ ! -d "${OLD_GLIBC_CACHE}/usr/lib" ]; then
         "https://archive.archlinux.org/packages/g/glibc/glibc-${GLIBC_VER}-x86_64.pkg.tar.zst"
     curl -sfL -o /tmp/old-gcc-libs.pkg.tar.zst \
         "https://archive.archlinux.org/packages/g/gcc-libs/gcc-libs-${GCC_LIBS_VER}-x86_64.pkg.tar.zst"
+    echo "${GLIBC_SHA256}  /tmp/old-glibc.pkg.tar.zst" | sha256sum -c -
+    echo "${GCC_LIBS_SHA256}  /tmp/old-gcc-libs.pkg.tar.zst" | sha256sum -c -
     tar --zstd -xf /tmp/old-glibc.pkg.tar.zst -C "${OLD_GLIBC_CACHE}"
     tar --zstd -xf /tmp/old-gcc-libs.pkg.tar.zst -C "${OLD_GLIBC_CACHE}"
     rm -f /tmp/old-glibc.pkg.tar.zst /tmp/old-gcc-libs.pkg.tar.zst

@@ -136,6 +136,12 @@ pub struct CalendarEntry {
     pub has_file: bool,
 }
 
+/// Cheap liveness payload for unauthenticated `GET /health`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthStatus {
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthDetail {
     pub status: String,

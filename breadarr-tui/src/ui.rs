@@ -73,7 +73,7 @@ fn context_keybindings(app: &App) -> Vec<(&'static str, &'static str)> {
         ],
         Tab::Review => vec![("a", "approve"), ("r", "reject")],
         Tab::Add => match app.focus {
-            Focus::AddSearchInput => vec![("Enter", "search")],
+            Focus::AddSearchInput => vec![("Enter", "search"), ("Esc", "clear")],
             _ => vec![("Enter", "add"), ("Esc", "back to search")],
         },
         Tab::Profiles if app.profile_detail.is_some() => {
@@ -745,6 +745,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             .collect();
         format!("{}  |  ?: help", hints.join("  |  "))
     };
-    let status = Paragraph::new(text).block(Block::default().borders(Borders::ALL));
+    let style = if app.busy {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    let status = Paragraph::new(text)
+        .style(style)
+        .block(Block::default().borders(Borders::ALL));
     frame.render_widget(status, area);
 }

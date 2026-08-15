@@ -7,6 +7,7 @@ use crate::dto::{
     SearchResult, StuckReport, UpdateQualityProfileWeightsRequest, WeightsDto,
 };
 
+#[derive(Clone)]
 pub struct DaemonClient {
     base_url: String,
     client: reqwest::Client,
@@ -16,8 +17,9 @@ impl DaemonClient {
     /// `api_token` mirrors `config.daemon.api_token` server-side — empty
     /// means "no auth configured," so this stays a no-op default header
     /// rather than sending a meaningless empty bearer token on every
-    /// request.
-    pub fn new(base_url: impl Into<String>, api_token: &str) -> Self {
+    /// request. A non-empty token that cannot be encoded as an HTTP header
+    /// is an error (not a silent unauthenticated client).
+    pub fn new(base_url: impl Into<String>, api_token: &str) -> Result<Self> {
         let mut builder = reqwest::Client::builder()
             // A default so no request can hang the TUI forever with zero
             // feedback if the daemon is unreachable or a connection stalls.
@@ -26,20 +28,23 @@ impl DaemonClient {
             // which overrides this.
             .timeout(std::time::Duration::from_secs(30));
         if !api_token.is_empty() {
+            let token = api_token.replace(['\r', '\n'], "");
+            anyhow::ensure!(
+                !token.is_empty(),
+                "daemon.api_token is non-empty but contains only CR/LF"
+            );
+            let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                .context("daemon.api_token is not a valid HTTP header value")?;
             let mut headers = reqwest::header::HeaderMap::new();
-            if let Ok(value) =
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {api_token}"))
-            {
-                headers.insert(reqwest::header::AUTHORIZATION, value);
-            }
+            headers.insert(reqwest::header::AUTHORIZATION, value);
             builder = builder.default_headers(headers);
         }
-        Self {
+        Ok(Self {
             base_url: base_url.into(),
             client: builder
                 .build()
                 .expect("reqwest client builder should not fail with only a timeout/headers set"),
-        }
+        })
     }
 
     pub async fn health(&self) -> Result<bool> {
@@ -59,7 +64,7 @@ impl DaemonClient {
     pub async fn health_detail(&self) -> Result<HealthDetail> {
         let resp = self
             .client
-            .get(format!("{}/health", self.base_url))
+            .get(format!("{}/health/detail", self.base_url))
             .timeout(std::time::Duration::from_secs(2))
             .send()
             .await

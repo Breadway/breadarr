@@ -1,3 +1,5 @@
+use std::path::{Component, Path as FsPath, PathBuf};
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -5,6 +7,7 @@ use breadarr_shared::dto::{
     AddMovieRequest, AddMovieResponse, AddSeriesRequest, AddSeriesResponse, EpisodeSummary,
     MediaItemDetail, MediaItemSummary, SearchNowResult,
 };
+use breadarr_shared::Config;
 use rusqlite::{params, OptionalExtension};
 
 use crate::api::AppState;
@@ -45,7 +48,7 @@ pub async fn detail(
     Path(id): Path<i64>,
 ) -> Result<Json<MediaItemDetail>, (StatusCode, String)> {
     let conn = state.conn.lock().await;
-    let (kind, title, year, monitored, root_folder) = conn
+    let row = conn
         .query_row(
             "SELECT kind, title, year, monitored, root_folder FROM media_item WHERE id = ?1",
             params![id],
@@ -59,7 +62,11 @@ pub async fn detail(
                 ))
             },
         )
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        .optional()
+        .map_err(internal)?;
+    let Some((kind, title, year, monitored, root_folder)) = row else {
+        return Err((StatusCode::NOT_FOUND, format!("no media_item {id}")));
+    };
 
     let mut stmt = conn
         .prepare(
@@ -105,6 +112,8 @@ pub async fn add(
         ));
     };
 
+    let root_folder = constrain_root_folder(&req.root_folder, &state.config.default_root_folder())?;
+
     // Fetch before taking the lock — a sync MutexGuard can't be held across
     // an `.await` point.
     let episodes = tvdb.episodes(&req.tvdb_id).await.map_err(internal)?;
@@ -117,7 +126,7 @@ pub async fn add(
             &req.title,
             req.year.map(|y| y as u32),
             &req.aliases,
-            &req.root_folder,
+            &root_folder,
             1,
             &episodes,
         )
@@ -131,13 +140,14 @@ pub async fn add_movie(
     State(state): State<AppState>,
     Json(req): Json<AddMovieRequest>,
 ) -> Result<Json<AddMovieResponse>, (StatusCode, String)> {
+    let root_folder = constrain_root_folder(&req.root_folder, &state.config.movies_root_folder())?;
     let conn = state.conn.lock().await;
     let media_item_id = metadata::insert_movie(
         &conn,
         &req.tmdb_id,
         &req.title,
         req.year.map(|y| y as u32),
-        &req.root_folder,
+        &root_folder,
         2,
     )
     .map_err(internal)?;
@@ -208,13 +218,9 @@ async fn set_episode_monitored(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Toggles every episode in one season at once — a season-level "row" isn't
-/// separately tracked (the `season` table exists in the schema but was
-/// never actually populated by any insert path, so resurrecting it just to
-/// hold one redundant monitored flag would mean keeping two copies of the
-/// same state in sync for no behavioral gain); bulk-updating the episodes
-/// directly gets the identical practical effect — this season's episodes
-/// stop appearing in search enumeration — with one source of truth.
+/// Toggles every episode in one season and the `season.monitored` flag
+/// when a season row exists (`insert_series` writes those). A missing
+/// season row is not an error — episodes still update.
 pub async fn monitor_season(
     State(state): State<AppState>,
     Path((media_item_id, season_number)): Path<(i64, i64)>,
@@ -242,6 +248,11 @@ async fn set_season_monitored(
             params![monitored as i64, media_item_id, season_number],
         )
         .map_err(internal)?;
+    // Season row is best-effort — older libraries (or movies) may have none.
+    let _ = conn.execute(
+        "UPDATE season SET monitored = ?1 WHERE media_item_id = ?2 AND season_number = ?3",
+        params![monitored as i64, media_item_id, season_number],
+    );
     if rows == 0 {
         return Err((
             StatusCode::NOT_FOUND,
@@ -283,21 +294,20 @@ pub async fn delete_episode_file(
     Path(episode_id): Path<i64>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let conn = state.conn.lock().await;
-    let row: Option<(i64, String)> = conn
-        .query_row(
-            "SELECT id, path FROM episode_file WHERE episode_id = ?1",
-            params![episode_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(internal)?;
-    let Some((file_id, path)) = row else {
+    let files = tracked_files(
+        &conn,
+        "SELECT id, path FROM episode_file WHERE episode_id = ?1",
+        episode_id,
+    )?;
+    if files.is_empty() {
         return Err((
             StatusCode::NOT_FOUND,
             format!("no file tracked for episode {episode_id}"),
         ));
-    };
-    delete_file_and_clear(&conn, &path, file_id)?;
+    }
+    for (file_id, path) in files {
+        delete_file_and_clear(&conn, &path, file_id)?;
+    }
     conn.execute(
         "UPDATE episode SET has_file = 0 WHERE id = ?1",
         params![episode_id],
@@ -315,21 +325,20 @@ pub async fn delete_movie_file(
     Path(media_item_id): Path<i64>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let conn = state.conn.lock().await;
-    let row: Option<(i64, String)> = conn
-        .query_row(
-            "SELECT id, path FROM episode_file WHERE media_item_id = ?1 AND episode_id IS NULL",
-            params![media_item_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(internal)?;
-    let Some((file_id, path)) = row else {
+    let files = tracked_files(
+        &conn,
+        "SELECT id, path FROM episode_file WHERE media_item_id = ?1 AND episode_id IS NULL",
+        media_item_id,
+    )?;
+    if files.is_empty() {
         return Err((
             StatusCode::NOT_FOUND,
             format!("no file tracked for media_item {media_item_id}"),
         ));
-    };
-    delete_file_and_clear(&conn, &path, file_id)?;
+    }
+    for (file_id, path) in files {
+        delete_file_and_clear(&conn, &path, file_id)?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -339,6 +348,20 @@ pub async fn delete_movie_file(
 /// alone, which a TV show shares across every one of its episode rows and
 /// would otherwise risk wiping an entire show's tracked files instead of
 /// the one the caller actually looked up.
+fn tracked_files(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    id: i64,
+) -> Result<Vec<(i64, String)>, (StatusCode, String)> {
+    let mut stmt = conn.prepare(sql).map_err(internal)?;
+    let files = stmt
+        .query_map(params![id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(internal)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(internal)?;
+    Ok(files)
+}
+
 fn delete_file_and_clear(
     conn: &rusqlite::Connection,
     path: &str,
@@ -500,6 +523,59 @@ async fn grab_candidate_via_background(
     .map_err(internal)?;
     reply_rx.await.map_err(internal)?.map_err(internal)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// After `~/` expand and lexical normalize, the path must stay under
+/// `allowed_root`. `..` components and absolute paths outside that root
+/// are rejected with 400.
+fn constrain_root_folder(
+    requested: &str,
+    allowed_root: &FsPath,
+) -> Result<String, (StatusCode, String)> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "root_folder must not be empty".into(),
+        ));
+    }
+    let expanded = Config::expand_path(requested);
+    if expanded
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "root_folder must not contain '..'".into(),
+        ));
+    }
+    let candidate = if expanded.is_absolute() {
+        normalize_lexically(&expanded)
+    } else {
+        normalize_lexically(&allowed_root.join(expanded))
+    };
+    let root = normalize_lexically(allowed_root);
+    if !candidate.starts_with(&root) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("root_folder must be under {}", root.display()),
+        ));
+    }
+    Ok(candidate.to_string_lossy().into_owned())
+}
+
+fn normalize_lexically(path: &FsPath) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {

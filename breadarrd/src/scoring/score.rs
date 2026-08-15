@@ -1,4 +1,4 @@
-use crate::parser::ParsedRelease;
+use crate::parser::{Codec, ParsedRelease, Source};
 
 use super::profile::{ProfileKind, QualityProfile};
 
@@ -8,8 +8,8 @@ pub fn score(parsed: &ParsedRelease, seeders: u32, has_hdr: bool, profile: &Qual
 
     total += w.seeder * seeder_score(seeders);
     total += w.resolution_tier * resolution_tier(parsed.resolution);
-    total += w.source_tier * parsed.source.map(|s| s as u8 as f32).unwrap_or(0.0);
-    total += w.codec_tier * parsed.codec.map(|c| c as u8 as f32).unwrap_or(0.0);
+    total += w.source_tier * source_tier(parsed.source);
+    total += w.codec_tier * codec_tier(parsed.codec);
 
     if parsed.bit_depth == Some(10) {
         total += w.bit_depth;
@@ -49,6 +49,29 @@ fn resolution_tier(resolution: Option<u32>) -> f32 {
         Some(r) if r >= 1080 => 2.0,
         Some(r) if r >= 720 => 1.0,
         _ => 0.0,
+    }
+}
+
+/// Explicit tiers — `Source::Hdtv` is discriminant 0, so casting the enum
+/// to `u8` scored HDTV identically to an unknown/missing source.
+fn source_tier(source: Option<Source>) -> f32 {
+    match source {
+        Some(Source::Hdtv) => 1.0,
+        Some(Source::WebRip) => 2.0,
+        Some(Source::WebDl) => 3.0,
+        Some(Source::BluRay) => 4.0,
+        Some(Source::Remux) => 5.0,
+        None => 0.0,
+    }
+}
+
+/// Same reason as `source_tier`: `Codec::H264` is discriminant 0.
+fn codec_tier(codec: Option<Codec>) -> f32 {
+    match codec {
+        Some(Codec::H264) => 1.0,
+        Some(Codec::Hevc) => 2.0,
+        Some(Codec::Av1) => 3.0,
+        None => 0.0,
     }
 }
 
@@ -150,6 +173,36 @@ mod tests {
 
         assert!(s1080 > s720);
         assert!(s720 > s480);
+    }
+
+    #[test]
+    fn hdtv_h264_scores_strictly_above_a_release_with_no_source_or_codec() {
+        let profile = QualityProfile::default_tv();
+        let known = parser::parse("Show S01E01 1080p HDTV H264");
+        let unknown = parser::parse("Show S01E01 1080p");
+        assert!(known.source.is_some());
+        assert!(known.codec.is_some());
+        assert!(unknown.source.is_none());
+        assert!(unknown.codec.is_none());
+        assert!(score(&known, 50, false, &profile) > score(&unknown, 50, false, &profile));
+    }
+
+    #[test]
+    fn remux_av1_scores_above_hdtv_h264() {
+        let profile = QualityProfile::default_movie();
+        let remux_av1 = parser::parse("Movie 2024 2160p Remux AV1");
+        let hdtv_h264 = parser::parse("Movie 2024 2160p HDTV H264");
+        assert!(score(&remux_av1, 50, false, &profile) > score(&hdtv_h264, 50, false, &profile));
+    }
+
+    #[test]
+    fn parsed_hdr_movie_scores_higher_than_the_same_release_without_hdr() {
+        let profile = QualityProfile::default_movie();
+        let hdr = parser::parse("Movie.2024.2160p.BluRay.HDR.H264");
+        let sdr = parser::parse("Movie.2024.2160p.BluRay.H264");
+        assert!(hdr.has_hdr);
+        assert!(!sdr.has_hdr);
+        assert!(score(&hdr, 50, hdr.has_hdr, &profile) > score(&sdr, 50, sdr.has_hdr, &profile));
     }
 
     #[test]
