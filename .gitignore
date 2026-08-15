@@ -5,7 +5,6 @@ config.toml
 *.db-shm
 
 # Local hygiene notes (not for commit)
-CLAUDE.md
 
 # Leftover source tarballs (never commit these)
 **/src.tar.xz
