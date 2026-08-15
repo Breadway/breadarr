@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "breadarr-shared"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bread-utils",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "breadarr-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "breadarr-shared",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "breadarrd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
