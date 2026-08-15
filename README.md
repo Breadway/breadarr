@@ -5,6 +5,10 @@ A single-daemon Rust replacement for the Sonarr + Radarr + Prowlarr stack — on
 - **`breadarrd`** — the daemon. Watches sources, matches releases to your library, scores and grabs candidates, imports completed downloads, probes them for real ground-truth quality, and refreshes Jellyfin. Runs as a `systemd --user` service.
 - **`breadarr-tui`** — a terminal client (ratatui) that talks to `breadarrd`'s local HTTP API. No web UI, on purpose.
 
+## Distribution
+
+breadarr is a **homelab** product. It is distributed through bakery (`bakery install breadarr`) and is **not** baked into the BOS ISO. It is not a GTK/desktop-shell app, has no bos-settings panel, and does not subscribe to or emit bread events. bread's `KNOWN_APPS` list reserves the `"arr"` app id for a possible future integration; this repo does not emit on that id.
+
 ## Why this exists
 
 Sonarr + Radarr + Prowlarr is three separate services, three databases, three web UIs, and a lot of setup surface for one workflow: watch for releases, pick the best one, download it, file it correctly, tell Jellyfin. breadarr collapses that into a single daemon, with a few specific problems solved directly rather than configured around:
@@ -28,6 +32,8 @@ Sonarr + Radarr + Prowlarr is three separate services, three databases, three we
 All three search-driven sources share one per-cycle request budget (default: 5 searches per 30-minute cycle, TPB tried first, then 1337x, then nyaa search) — kept conservative since 1337x has a ban history and the goal is steady backlog clearing, not maximum throughput. A whole cycle failing outright backs off the *next cycle's* interval (1h → 2h → 4h, capped), on top of each source's own per-mirror cooldowns.
 
 ## Setup
+
+Install via bakery (`bakery install breadarr`) on a homelab host, or build from this repo. breadarr is not on the BOS ISO.
 
 1. Copy `config.example.toml` to `~/.config/breadarr/breadarrd.toml` and fill in:
    - qBittorrent WebUI URL/credentials
