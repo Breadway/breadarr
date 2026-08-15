@@ -19,8 +19,7 @@ regex.workspace = true
 serde_json.workspace = true
 ort.workspace = true
 tokenizers.workspace = true
-# TODO(owner): switch to tag-pinned git dependency once bread-onnx is merged and tagged, matching the bread-theme pattern
-bread-onnx = { git = "https://git.breadway.dev/Breadway/bread-ecosystem", tag = "v0.3.0" }
+bread-onnx = { git = "https://git.breadway.dev/Breadway/bread-ecosystem", tag = "v0.7.2" }
 scraper.workspace = true
 chrono.workspace = true
 fastrand.workspace = true

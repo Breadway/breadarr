@@ -9,4 +9,4 @@ anyhow.workspace = true
 toml.workspace = true
 reqwest.workspace = true
 chrono.workspace = true
-bread-utils = { git = "https://git.breadway.dev/Breadway/bread-ecosystem", tag = "v0.3.0", }
+bread-utils = { git = "https://git.breadway.dev/Breadway/bread-ecosystem", tag = "v0.7.2" }

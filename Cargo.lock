@@ -177,8 +177,8 @@ dependencies = [
 
 [[package]]
 name = "bread-onnx"
-version = "0.3.0"
-source = "git+https://git.breadway.dev/Breadway/bread-ecosystem?tag=v0.3.0#8e82d2d833e992ce939a5b836f910ee109f2e939"
+version = "0.7.2"
+source = "git+https://git.breadway.dev/Breadway/bread-ecosystem?tag=v0.7.2#30517f161724132cdeb658c04cf5e490be07ee73"
 dependencies = [
  "anyhow",
  "bread-utils",
@@ -192,8 +192,8 @@ dependencies = [
 
 [[package]]
 name = "bread-utils"
-version = "0.3.0"
-source = "git+https://git.breadway.dev/Breadway/bread-ecosystem?tag=v0.3.0#8e82d2d833e992ce939a5b836f910ee109f2e939"
+version = "0.7.2"
+source = "git+https://git.breadway.dev/Breadway/bread-ecosystem?tag=v0.7.2#30517f161724132cdeb658c04cf5e490be07ee73"
 dependencies = [
  "dirs",
  "serde",
