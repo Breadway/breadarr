@@ -1,12 +1,13 @@
 use anyhow::Result;
 use breadarr_shared::dto::{
-    CalendarEntry, HealthDetail, LibraryHealthReport, MediaItemDetail, MediaItemSummary,
-    QualityProfileSummary, ReleaseCandidate, ReleaseSummary, ReviewQueueEntry, SearchNowResult,
-    SearchResult, StuckReport, WeightsDto,
+    CalendarEntry, EpisodeSummary, FlaggedFile, HealthDetail, LibraryHealthReport, MediaItemDetail,
+    MediaItemSummary, QualityProfileSummary, ReleaseCandidate, ReleaseSummary, ReviewQueueEntry,
+    SearchNowResult, SearchResult, StuckReport, WeightsDto,
 };
 use breadarr_shared::DaemonClient;
 use ratatui::widgets::ListState;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// Category roots the TUI's "Add" flow can place new items under — kept as
 /// two separate paths (not one shared default) since a series and a movie
@@ -75,8 +76,8 @@ impl Tab {
         match self {
             Tab::Library => "Library",
             Tab::History => "History",
-            Tab::Review => "Review Queue",
-            Tab::Add => "Add Show",
+            Tab::Review => "Review",
+            Tab::Add => "Add",
             Tab::Stuck => "Stuck",
             Tab::Calendar => "Calendar",
             Tab::LibraryHealth => "Health",
@@ -89,6 +90,10 @@ pub enum Focus {
     List,
     AddSearchInput,
     AddResults,
+    /// Incremental title filter on the Library list — `App::library_query`
+    /// holds the in-progress text, same priority-over-global-keys pattern
+    /// as `AddSearchInput`.
+    LibraryFilterInput,
     /// The manual release picker overlay — `App::candidates` holds the
     /// list, `App::candidates_episode_id` remembers which episode (or, if
     /// `None`, the open movie) it was fetched for so a grab can be
@@ -238,13 +243,70 @@ pub struct AddResult {
 }
 
 /// Result of a long `DaemonClient` call spawned off the draw loop so
-/// `search_now` / candidate fetch (up to 600s) cannot freeze key handling.
+/// `search_now` / candidate fetch / add-tab search cannot freeze key
+/// handling. Add-search is typically a few seconds (TVDB + TMDB together)
+/// rather than minutes, but it still shouldn't stall j/k or Tab.
 enum BackgroundOutcome {
     SearchNow(Result<SearchNowResult>),
     Candidates {
         episode_id: Option<i64>,
         result: Result<Vec<ReleaseCandidate>>,
     },
+    AddSearch {
+        results: Vec<AddResult>,
+        errors: Vec<String>,
+    },
+}
+
+/// Case-insensitive substring match used by the Library `/` filter.
+fn title_matches_query(title: &str, query: &str) -> bool {
+    query.is_empty() || title.to_lowercase().contains(&query.to_lowercase())
+}
+
+/// Next monitored-and-missing episode, wrapping from `start` so `n` can
+/// be mashed through a season without first jumping to the top.
+fn next_missing_index(episodes: &[EpisodeSummary], start: usize) -> Option<usize> {
+    if episodes.is_empty() {
+        return None;
+    }
+    let start = start.min(episodes.len());
+    episodes
+        .iter()
+        .enumerate()
+        .skip(start)
+        .chain(episodes.iter().enumerate().take(start))
+        .find(|(_, e)| e.monitored && !e.has_file)
+        .map(|(i, _)| i)
+}
+
+fn clamp_list_state(state: &mut ListState, len: usize) {
+    match (state.selected(), len) {
+        (_, 0) => state.select(None),
+        (None, _) => state.select(Some(0)),
+        (Some(i), _) if i >= len => state.select(Some(len - 1)),
+        _ => {}
+    }
+}
+
+/// Row count of the Health tab's flagged-files list, including section
+/// headers — must stay in lockstep with `draw_library_health` so j/k
+/// doesn't walk off the rendered items.
+pub fn health_row_count(report: &LibraryHealthReport) -> usize {
+    let mut n = 0;
+    let mut add_files = |files: &[FlaggedFile]| {
+        if !files.is_empty() {
+            n += 1 + files.len();
+        }
+    };
+    add_files(&report.corrupt_files);
+    add_files(&report.under_quality_files);
+    add_files(&report.no_english_audio_files);
+    add_files(&report.non_english_default_audio_files);
+    add_files(&report.no_subtitle_files);
+    if !report.duplicate_groups.is_empty() {
+        n += 1 + report.duplicate_groups.len();
+    }
+    n.max(1)
 }
 
 pub struct App {
@@ -254,6 +316,10 @@ pub struct App {
     pub tab: Tab,
     pub focus: Focus,
     pub status: String,
+    /// When `status` was last written — the draw loop clears it after a
+    /// few seconds so action feedback doesn't permanently hide the
+    /// keybinding hints in the status bar.
+    status_set_at: Option<Instant>,
     pub should_quit: bool,
     /// Toggled by `?`; intercepted at the top of `main.rs`'s key handler
     /// like `Focus::AddSearchInput`/`Focus::WeightInput`, but kept as its
@@ -273,6 +339,9 @@ pub struct App {
     pub library_view: Vec<usize>,
     pub library_filter: LibraryFilter,
     pub library_sort: LibrarySort,
+    /// Incremental title filter from `/` — applied on top of
+    /// `library_filter`/`library_sort` inside `recompute_library_view`.
+    pub library_query: String,
     pub detail: Option<MediaItemDetail>,
     /// Selection within `detail.episodes` — separate from `media_state`
     /// since they're two different lists sharing the same tab.
@@ -283,6 +352,9 @@ pub struct App {
 
     pub review_items: Vec<ReviewQueueEntry>,
     pub review_state: ListState,
+    /// Last-seen review-queue depth, kept even when the Review tab isn't
+    /// the one being refreshed so the tab strip can badge it.
+    pub review_count: usize,
 
     pub add_query: String,
     pub add_results: Vec<AddResult>,
@@ -292,8 +364,12 @@ pub struct App {
     pub stuck_focus: StuckSection,
     pub stalled_state: ListState,
     pub maxed_state: ListState,
+    /// Last-seen stalled+maxed count for the Stuck tab badge.
+    pub stuck_count: usize,
     pub calendar: Vec<CalendarEntry>,
+    pub calendar_state: ListState,
     pub library_health: Option<LibraryHealthReport>,
+    pub health_state: ListState,
 
     pub candidates: Vec<ReleaseCandidate>,
     pub candidates_state: ListState,
@@ -338,6 +414,7 @@ impl App {
             tab: Tab::Library,
             focus: Focus::List,
             status: String::new(),
+            status_set_at: None,
             should_quit: false,
             help_visible: false,
             force_refresh: false,
@@ -346,12 +423,14 @@ impl App {
             library_view: Vec::new(),
             library_filter: LibraryFilter::All,
             library_sort: LibrarySort::TitleAsc,
+            library_query: String::new(),
             detail: None,
             episode_state: ListState::default(),
             releases: Vec::new(),
             releases_state: ListState::default(),
             review_items: Vec::new(),
             review_state: ListState::default(),
+            review_count: 0,
             add_query: String::new(),
             add_results: Vec::new(),
             add_results_state: ListState::default(),
@@ -359,8 +438,11 @@ impl App {
             stuck_focus: StuckSection::Stalled,
             stalled_state: ListState::default(),
             maxed_state: ListState::default(),
+            stuck_count: 0,
             calendar: Vec::new(),
+            calendar_state: ListState::default(),
             library_health: None,
+            health_state: ListState::default(),
             candidates: Vec::new(),
             candidates_state: ListState::default(),
             candidates_episode_id: None,
@@ -376,190 +458,32 @@ impl App {
         }
     }
 
-    /// Applies a finished background search/candidate task. Only `.await`s
-    /// a handle that `is_finished()`, so the draw loop stays responsive.
-    pub async fn poll_background(&mut self) {
-        let Some(handle) = &self.background else {
-            return;
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_set_at = if self.status.is_empty() {
+            None
+        } else {
+            Some(Instant::now())
         };
-        if !handle.is_finished() {
+    }
+
+    /// Drops stale action feedback so the status bar can show keybinding
+    /// hints again. In-flight work (`busy`) keeps its "searching..." line.
+    pub fn expire_status(&mut self) {
+        if self.busy {
             return;
         }
-        let handle = self.background.take().expect("just checked is_finished");
-        self.busy = false;
-        match handle.await {
-            Ok(BackgroundOutcome::SearchNow(Ok(stats))) => {
-                self.status = format!(
-                    "search complete: {} target(s), {} grabbed, {} error(s)",
-                    stats.targets, stats.grabbed, stats.errors
-                );
+        if let Some(at) = self.status_set_at {
+            if at.elapsed() >= Duration::from_secs(5) {
+                self.status.clear();
+                self.status_set_at = None;
             }
-            Ok(BackgroundOutcome::SearchNow(Err(e))) => {
-                self.status = format!("search failed: {e}");
-            }
-            Ok(BackgroundOutcome::Candidates {
-                episode_id,
-                result: Ok(candidates),
-            }) => {
-                self.status = format!("{} candidate(s) found", candidates.len());
-                if matches!(self.tab, Tab::Library) && self.detail.is_some() {
-                    self.candidates_state.select(if candidates.is_empty() {
-                        None
-                    } else {
-                        Some(0)
-                    });
-                    self.candidates = candidates;
-                    self.candidates_episode_id = episode_id;
-                    self.focus = Focus::Candidates;
-                }
-            }
-            Ok(BackgroundOutcome::Candidates { result: Err(e), .. }) => {
-                self.status = format!("candidate fetch failed: {e}");
-            }
-            Err(e) => self.status = format!("background task failed: {e}"),
         }
     }
 
-    pub async fn refresh_active_tab(&mut self) {
-        match self.client.health_detail().await {
-            Ok(detail) => {
-                self.daemon_up = true;
-                self.health = Some(detail);
-            }
-            Err(_) => {
-                self.daemon_up = false;
-                self.health = None;
-            }
-        }
-        if !self.daemon_up {
-            self.status = "daemon unreachable".to_string();
-            return;
-        }
-        let result: Result<()> = async {
-            match self.tab {
-                Tab::Library => {
-                    if self.detail.is_some() {
-                        if let Some(id) = self.selected_media_id() {
-                            self.detail = Some(self.client.media_detail(id).await?);
-                        }
-                    } else {
-                        self.media_items = self.client.list_media().await?;
-                        self.recompute_library_view();
-                    }
-                }
-                Tab::History => {
-                    self.releases = self.client.releases().await?;
-                    if self.releases_state.selected().is_none() && !self.releases.is_empty() {
-                        self.releases_state.select(Some(0));
-                    }
-                }
-                Tab::Review => {
-                    self.review_items = self.client.review_queue().await?;
-                    if self.review_state.selected().is_none() && !self.review_items.is_empty() {
-                        self.review_state.select(Some(0));
-                    }
-                }
-                Tab::Add => {}
-                Tab::Stuck => {
-                    let report = self.client.stuck().await?;
-                    if self.stalled_state.selected().is_none() && !report.stalled_grabs.is_empty()
-                    {
-                        self.stalled_state.select(Some(0));
-                    }
-                    if self.maxed_state.selected().is_none()
-                        && !report.maxed_out_search_targets.is_empty()
-                    {
-                        self.maxed_state.select(Some(0));
-                    }
-                    self.stuck = Some(report);
-                }
-                Tab::Calendar => {
-                    self.calendar = self.client.calendar().await?;
-                }
-                Tab::LibraryHealth => {
-                    self.library_health = Some(self.client.library_health().await?);
-                }
-                Tab::Profiles => {
-                    if self.profile_detail.is_none() {
-                        self.quality_profiles = self.client.quality_profiles().await?;
-                        if self.profiles_state.selected().is_none()
-                            && !self.quality_profiles.is_empty()
-                        {
-                            self.profiles_state.select(Some(0));
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-        .await;
-
-        if let Err(e) = result {
-            self.status = format!("error: {e}");
-        }
-    }
-
-    fn selected_media_id(&self) -> Option<i64> {
-        self.detail.as_ref().map(|d| d.id)
-    }
-
-    /// Rebuilds `library_view` from `media_items` under the current
-    /// filter/sort, then re-selects whichever item was selected before (by
-    /// id, not raw index) if it's still in view — falls back to the first
-    /// item, or no selection if the view is now empty. Called after
-    /// `media_items` changes, and after `library_filter`/`library_sort`
-    /// change.
-    pub fn recompute_library_view(&mut self) {
-        let previously_selected_id = self.selected_media_item().map(|m| m.id);
-
-        let mut indices: Vec<usize> = self
-            .media_items
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| self.library_filter.matches(m))
-            .map(|(i, _)| i)
-            .collect();
-
-        match self.library_sort {
-            LibrarySort::TitleAsc => indices.sort_by(|&a, &b| {
-                self.media_items[a]
-                    .title
-                    .to_lowercase()
-                    .cmp(&self.media_items[b].title.to_lowercase())
-            }),
-            LibrarySort::MissingDesc => indices.sort_by(|&a, &b| {
-                self.media_items[b]
-                    .missing_count
-                    .cmp(&self.media_items[a].missing_count)
-            }),
-            LibrarySort::Kind => indices.sort_by(|&a, &b| {
-                self.media_items[a].kind.cmp(&self.media_items[b].kind).then_with(|| {
-                    self.media_items[a]
-                        .title
-                        .to_lowercase()
-                        .cmp(&self.media_items[b].title.to_lowercase())
-                })
-            }),
-        }
-        self.library_view = indices;
-
-        match previously_selected_id
-            .and_then(|id| self.library_view.iter().position(|&i| self.media_items[i].id == id))
-        {
-            Some(pos) => self.media_state.select(Some(pos)),
-            None if !self.library_view.is_empty() => self.media_state.select(Some(0)),
-            None => self.media_state.select(None),
-        }
-    }
-
-    pub fn selected_media_item(&self) -> Option<&MediaItemSummary> {
-        let idx = self.media_state.selected()?;
-        let real_idx = *self.library_view.get(idx)?;
-        self.media_items.get(real_idx)
-    }
-
-    pub fn move_selection(&mut self, delta: i32) {
-        let (state, len) = match self.tab {
+    /// The list currently driven by j/k / g/G / PageUp/PageDown.
+    fn active_list(&mut self) -> (&mut ListState, usize) {
+        match self.tab {
             Tab::Library if matches!(self.focus, Focus::Candidates) => {
                 (&mut self.candidates_state, self.candidates.len())
             }
@@ -582,12 +506,247 @@ impl App {
                     StuckSection::Maxed => (&mut self.maxed_state, report_len.1),
                 }
             }
+            Tab::Calendar => (&mut self.calendar_state, self.calendar.len()),
+            Tab::LibraryHealth => {
+                let n = self
+                    .library_health
+                    .as_ref()
+                    .map(health_row_count)
+                    .unwrap_or(0);
+                (&mut self.health_state, n)
+            }
             Tab::Profiles if self.profile_detail.is_some() => {
                 (&mut self.profile_weight_state, WEIGHT_FIELDS.len())
             }
             Tab::Profiles => (&mut self.profiles_state, self.quality_profiles.len()),
-            _ => return,
+        }
+    }
+
+    pub fn select_edge(&mut self, last: bool) {
+        let (state, len) = self.active_list();
+        if len == 0 {
+            return;
+        }
+        state.select(Some(if last { len - 1 } else { 0 }));
+    }
+
+    /// Applies a finished background search/candidate task. Only `.await`s
+    /// a handle that `is_finished()`, so the draw loop stays responsive.
+    pub async fn poll_background(&mut self) {
+        let Some(handle) = &self.background else {
+            return;
         };
+        if !handle.is_finished() {
+            return;
+        }
+        let handle = self.background.take().expect("just checked is_finished");
+        self.busy = false;
+        match handle.await {
+            Ok(BackgroundOutcome::SearchNow(Ok(stats))) => {
+                self.set_status(format!(
+                    "search complete: {} target(s), {} grabbed, {} error(s)",
+                    stats.targets, stats.grabbed, stats.errors
+                ));
+            }
+            Ok(BackgroundOutcome::SearchNow(Err(e))) => {
+                self.set_status(format!("search failed: {e}"));
+            }
+            Ok(BackgroundOutcome::Candidates {
+                episode_id,
+                result: Ok(candidates),
+            }) => {
+                self.set_status(format!("{} candidate(s) found", candidates.len()));
+                if matches!(self.tab, Tab::Library) && self.detail.is_some() {
+                    self.candidates_state.select(if candidates.is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    });
+                    self.candidates = candidates;
+                    self.candidates_episode_id = episode_id;
+                    self.focus = Focus::Candidates;
+                }
+            }
+            Ok(BackgroundOutcome::Candidates { result: Err(e), .. }) => {
+                self.set_status(format!("candidate fetch failed: {e}"));
+            }
+            Ok(BackgroundOutcome::AddSearch { results, errors }) => {
+                self.add_results_state
+                    .select(if results.is_empty() { None } else { Some(0) });
+                self.add_results = results;
+                self.set_status(if errors.is_empty() {
+                    String::new()
+                } else {
+                    errors.join("; ")
+                });
+                if matches!(self.tab, Tab::Add) {
+                    self.focus = Focus::AddResults;
+                }
+            }
+            Err(e) => self.set_status(format!("background task failed: {e}")),
+        }
+    }
+
+    pub async fn refresh_active_tab(&mut self) {
+        match self.client.health_detail().await {
+            Ok(detail) => {
+                self.daemon_up = true;
+                self.health = Some(detail);
+            }
+            Err(_) => {
+                self.daemon_up = false;
+                self.health = None;
+            }
+        }
+        if !self.daemon_up {
+            self.set_status("daemon unreachable");
+            return;
+        }
+        let result: Result<()> = async {
+            match self.tab {
+                Tab::Library => {
+                    if self.detail.is_some() {
+                        if let Some(id) = self.selected_media_id() {
+                            self.detail = Some(self.client.media_detail(id).await?);
+                        }
+                    } else {
+                        self.media_items = self.client.list_media().await?;
+                        self.recompute_library_view();
+                    }
+                }
+                Tab::History => {
+                    self.releases = self.client.releases().await?;
+                    clamp_list_state(&mut self.releases_state, self.releases.len());
+                }
+                Tab::Review => {
+                    self.review_items = self.client.review_queue().await?;
+                    self.review_count = self.review_items.len();
+                    clamp_list_state(&mut self.review_state, self.review_items.len());
+                }
+                Tab::Add => {}
+                Tab::Stuck => {
+                    let report = self.client.stuck().await?;
+                    self.stuck_count =
+                        report.stalled_grabs.len() + report.maxed_out_search_targets.len();
+                    clamp_list_state(&mut self.stalled_state, report.stalled_grabs.len());
+                    clamp_list_state(&mut self.maxed_state, report.maxed_out_search_targets.len());
+                    self.stuck = Some(report);
+                }
+                Tab::Calendar => {
+                    self.calendar = self.client.calendar().await?;
+                    clamp_list_state(&mut self.calendar_state, self.calendar.len());
+                }
+                Tab::LibraryHealth => {
+                    self.library_health = Some(self.client.library_health().await?);
+                    let n = self
+                        .library_health
+                        .as_ref()
+                        .map(health_row_count)
+                        .unwrap_or(0);
+                    clamp_list_state(&mut self.health_state, n);
+                }
+                Tab::Profiles => {
+                    if self.profile_detail.is_none() {
+                        self.quality_profiles = self.client.quality_profiles().await?;
+                        clamp_list_state(&mut self.profiles_state, self.quality_profiles.len());
+                    }
+                }
+            }
+            self.refresh_badge_counts().await;
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            self.set_status(format!("error: {e}"));
+        }
+    }
+
+    /// Cheap counts for the tab-strip badges. Skips the resource the
+    /// active tab already fetched so we don't double-hit the same route.
+    async fn refresh_badge_counts(&mut self) {
+        if !matches!(self.tab, Tab::Review) {
+            if let Ok(items) = self.client.review_queue().await {
+                self.review_count = items.len();
+            }
+        }
+        if !matches!(self.tab, Tab::Stuck) {
+            if let Ok(report) = self.client.stuck().await {
+                self.stuck_count =
+                    report.stalled_grabs.len() + report.maxed_out_search_targets.len();
+            }
+        }
+    }
+
+    fn selected_media_id(&self) -> Option<i64> {
+        self.detail.as_ref().map(|d| d.id)
+    }
+
+    /// Rebuilds `library_view` from `media_items` under the current
+    /// filter/sort, then re-selects whichever item was selected before (by
+    /// id, not raw index) if it's still in view — falls back to the first
+    /// item, or no selection if the view is now empty. Called after
+    /// `media_items` changes, and after `library_filter`/`library_sort`
+    /// change.
+    pub fn recompute_library_view(&mut self) {
+        let previously_selected_id = self.selected_media_item().map(|m| m.id);
+
+        let query = self.library_query.clone();
+        let mut indices: Vec<usize> = self
+            .media_items
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                self.library_filter.matches(m) && title_matches_query(&m.title, &query)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        match self.library_sort {
+            LibrarySort::TitleAsc => indices.sort_by(|&a, &b| {
+                self.media_items[a]
+                    .title
+                    .to_lowercase()
+                    .cmp(&self.media_items[b].title.to_lowercase())
+            }),
+            LibrarySort::MissingDesc => indices.sort_by(|&a, &b| {
+                self.media_items[b]
+                    .missing_count
+                    .cmp(&self.media_items[a].missing_count)
+            }),
+            LibrarySort::Kind => indices.sort_by(|&a, &b| {
+                self.media_items[a]
+                    .kind
+                    .cmp(&self.media_items[b].kind)
+                    .then_with(|| {
+                        self.media_items[a]
+                            .title
+                            .to_lowercase()
+                            .cmp(&self.media_items[b].title.to_lowercase())
+                    })
+            }),
+        }
+        self.library_view = indices;
+
+        match previously_selected_id.and_then(|id| {
+            self.library_view
+                .iter()
+                .position(|&i| self.media_items[i].id == id)
+        }) {
+            Some(pos) => self.media_state.select(Some(pos)),
+            None if !self.library_view.is_empty() => self.media_state.select(Some(0)),
+            None => self.media_state.select(None),
+        }
+    }
+
+    pub fn selected_media_item(&self) -> Option<&MediaItemSummary> {
+        let idx = self.media_state.selected()?;
+        let real_idx = *self.library_view.get(idx)?;
+        self.media_items.get(real_idx)
+    }
+
+    pub fn move_selection(&mut self, delta: i32) {
+        let (state, len) = self.active_list();
         if len == 0 {
             return;
         }
@@ -612,13 +771,47 @@ impl App {
                 });
                 self.detail = Some(detail);
             }
-            Err(e) => self.status = format!("error loading detail: {e}"),
+            Err(e) => self.set_status(format!("error loading detail: {e}")),
         }
     }
 
     pub fn close_detail(&mut self) {
         self.detail = None;
         self.episode_state.select(None);
+        if matches!(self.focus, Focus::Candidates) {
+            self.close_candidates();
+        }
+    }
+
+    pub fn start_library_filter(&mut self) {
+        if self.detail.is_some() {
+            return;
+        }
+        self.focus = Focus::LibraryFilterInput;
+    }
+
+    pub fn confirm_library_filter(&mut self) {
+        self.focus = Focus::List;
+    }
+
+    pub fn clear_library_filter(&mut self) {
+        self.library_query.clear();
+        self.focus = Focus::List;
+        self.recompute_library_view();
+    }
+
+    /// Advances the episode selection to the next monitored episode that
+    /// still has no file, wrapping so a second `n` at the end of the list
+    /// starts over rather than doing nothing.
+    pub fn select_next_missing_episode(&mut self) {
+        let Some(detail) = &self.detail else {
+            return;
+        };
+        let start = self.episode_state.selected().map(|i| i + 1).unwrap_or(0);
+        match next_missing_index(&detail.episodes, start) {
+            Some(i) => self.episode_state.select(Some(i)),
+            None => self.set_status("no missing monitored episodes"),
+        }
     }
 
     /// Toggles monitored on whichever episode is currently selected in the
@@ -641,14 +834,14 @@ impl App {
         };
         match result {
             Ok(()) => {
-                self.status = "episode monitor state updated".to_string();
+                self.set_status("episode monitor state updated".to_string());
                 if let Some(id) = self.selected_media_id() {
                     if let Ok(fresh) = self.client.media_detail(id).await {
                         self.detail = Some(fresh);
                     }
                 }
             }
-            Err(e) => self.status = format!("episode monitor toggle failed: {e}"),
+            Err(e) => self.set_status(format!("episode monitor toggle failed: {e}")),
         }
     }
 
@@ -677,12 +870,12 @@ impl App {
         };
         match result {
             Ok(()) => {
-                self.status = format!("season {season_number} monitor state updated");
+                self.set_status(format!("season {season_number} monitor state updated"));
                 if let Ok(fresh) = self.client.media_detail(media_item_id).await {
                     self.detail = Some(fresh);
                 }
             }
-            Err(e) => self.status = format!("season monitor toggle failed: {e}"),
+            Err(e) => self.set_status(format!("season monitor toggle failed: {e}")),
         }
     }
 
@@ -694,10 +887,12 @@ impl App {
             return;
         };
         match self.client.approve_review(item.id).await {
-            Ok(()) => self.status = format!("approved: {}", item.raw_release_title),
-            Err(e) => self.status = format!("approve failed: {e}"),
+            Ok(()) => self.set_status(format!("approved: {}", item.raw_release_title)),
+            Err(e) => self.set_status(format!("approve failed: {e}")),
         }
         self.review_items = self.client.review_queue().await.unwrap_or_default();
+        self.review_count = self.review_items.len();
+        clamp_list_state(&mut self.review_state, self.review_items.len());
     }
 
     pub async fn reject_selected_review(&mut self) {
@@ -708,10 +903,12 @@ impl App {
             return;
         };
         match self.client.reject_review(item.id).await {
-            Ok(()) => self.status = format!("rejected: {}", item.raw_release_title),
-            Err(e) => self.status = format!("reject failed: {e}"),
+            Ok(()) => self.set_status(format!("rejected: {}", item.raw_release_title)),
+            Err(e) => self.set_status(format!("reject failed: {e}")),
         }
         self.review_items = self.client.review_queue().await.unwrap_or_default();
+        self.review_count = self.review_items.len();
+        clamp_list_state(&mut self.review_state, self.review_items.len());
     }
 
     /// Searches series and movies together instead of requiring the user to
@@ -722,41 +919,36 @@ impl App {
     /// a movie search returned nothing because the mode had never actually
     /// switched). Querying both up front removes the failure mode entirely.
     pub async fn run_add_search(&mut self) {
-        if self.add_query.trim().is_empty() {
+        if self.add_query.trim().is_empty() || self.busy {
             return;
         }
-        let (series_result, movie_result) = tokio::join!(
-            self.client.search_series(&self.add_query),
-            self.client.search_movies(&self.add_query)
-        );
+        self.set_status("searching movies and TV...");
+        self.busy = true;
+        let client = self.client.clone();
+        let query = self.add_query.clone();
+        self.background = Some(tokio::spawn(async move {
+            let (series_result, movie_result) =
+                tokio::join!(client.search_series(&query), client.search_movies(&query));
 
-        let mut results = Vec::new();
-        let mut errors = Vec::new();
-        match series_result {
-            Ok(hits) => results.extend(hits.into_iter().map(|result| AddResult {
-                kind: AddKind::Series,
-                result,
-            })),
-            Err(e) => errors.push(format!("series search failed: {e}")),
-        }
-        match movie_result {
-            Ok(hits) => results.extend(hits.into_iter().map(|result| AddResult {
-                kind: AddKind::Movie,
-                result,
-            })),
-            Err(e) => errors.push(format!("movie search failed: {e}")),
-        }
-        results.sort_by_key(|a| a.result.title.to_lowercase());
-
-        self.add_results_state
-            .select(if results.is_empty() { None } else { Some(0) });
-        self.add_results = results;
-        self.status = if errors.is_empty() {
-            String::new()
-        } else {
-            errors.join("; ")
-        };
-        self.focus = Focus::AddResults;
+            let mut results = Vec::new();
+            let mut errors = Vec::new();
+            match series_result {
+                Ok(hits) => results.extend(hits.into_iter().map(|result| AddResult {
+                    kind: AddKind::Series,
+                    result,
+                })),
+                Err(e) => errors.push(format!("series search failed: {e}")),
+            }
+            match movie_result {
+                Ok(hits) => results.extend(hits.into_iter().map(|result| AddResult {
+                    kind: AddKind::Movie,
+                    result,
+                })),
+                Err(e) => errors.push(format!("movie search failed: {e}")),
+            }
+            results.sort_by_key(|a| a.result.title.to_lowercase());
+            BackgroundOutcome::AddSearch { results, errors }
+        }));
     }
 
     pub async fn add_selected_search_result(&mut self, roots: &LibraryRoots) {
@@ -789,12 +981,15 @@ impl App {
         };
         match outcome {
             Ok(media_item_id) => {
-                self.status = format!("added {:?} (media_item_id={media_item_id})", result.title);
+                self.set_status(format!(
+                    "added {:?} (media_item_id={media_item_id})",
+                    result.title
+                ));
                 self.add_results.clear();
                 self.add_query.clear();
                 self.focus = Focus::AddSearchInput;
             }
-            Err(e) => self.status = format!("add failed: {e}"),
+            Err(e) => self.set_status(format!("add failed: {e}")),
         }
     }
 
@@ -809,7 +1004,7 @@ impl App {
         if self.busy {
             return;
         }
-        self.status = "searching now...".to_string();
+        self.set_status("searching now...".to_string());
         self.busy = true;
         let client = self.client.clone();
         self.background = Some(tokio::spawn(async move {
@@ -841,7 +1036,7 @@ impl App {
             return;
         }
 
-        self.status = "fetching candidates...".to_string();
+        self.set_status("fetching candidates...".to_string());
         self.busy = true;
         let client = self.client.clone();
         self.background = Some(tokio::spawn(async move {
@@ -879,13 +1074,13 @@ impl App {
         };
         match result {
             Ok(()) => {
-                self.status = format!("grabbed: {}", candidate.raw_title);
+                self.set_status(format!("grabbed: {}", candidate.raw_title));
                 self.close_candidates();
                 if let Ok(fresh) = self.client.media_detail(media_item_id).await {
                     self.detail = Some(fresh);
                 }
             }
-            Err(e) => self.status = format!("grab failed: {e}"),
+            Err(e) => self.set_status(format!("grab failed: {e}")),
         }
     }
 
@@ -955,7 +1150,10 @@ impl App {
         let value: f32 = match self.weight_input_buffer.trim().parse() {
             Ok(v) => v,
             Err(_) => {
-                self.status = format!("'{}' is not a valid number", self.weight_input_buffer);
+                self.set_status(format!(
+                    "'{}' is not a valid number",
+                    self.weight_input_buffer
+                ));
                 return;
             }
         };
@@ -972,11 +1170,11 @@ impl App {
             .await
         {
             Ok(()) => {
-                self.status = format!("{name} updated to {value}");
+                self.set_status(format!("{name} updated to {value}"));
                 self.weight_input_buffer.clear();
                 self.focus = Focus::List;
             }
-            Err(e) => self.status = format!("weight update failed: {e}"),
+            Err(e) => self.set_status(format!("weight update failed: {e}")),
         }
     }
 
@@ -994,11 +1192,11 @@ impl App {
         };
         match result {
             Ok(()) => {
-                self.status = "monitor state updated".to_string();
+                self.set_status("monitor state updated".to_string());
                 self.media_items = self.client.list_media().await.unwrap_or_default();
                 self.recompute_library_view();
             }
-            Err(e) => self.status = format!("monitor toggle failed: {e}"),
+            Err(e) => self.set_status(format!("monitor toggle failed: {e}")),
         }
     }
 
@@ -1014,12 +1212,12 @@ impl App {
         };
         match result {
             Ok(()) => {
-                self.status = "monitor state updated".to_string();
+                self.set_status("monitor state updated".to_string());
                 if let Ok(fresh) = self.client.media_detail(id).await {
                     self.detail = Some(fresh);
                 }
             }
-            Err(e) => self.status = format!("monitor toggle failed: {e}"),
+            Err(e) => self.set_status(format!("monitor toggle failed: {e}")),
         }
     }
 
@@ -1031,18 +1229,18 @@ impl App {
         };
         if !self.confirm_delete {
             self.confirm_delete = true;
-            self.status = "press x again to confirm delete".to_string();
+            self.set_status("press x again to confirm delete".to_string());
             return;
         }
         self.confirm_delete = false;
         match self.client.delete_media(id).await {
             Ok(()) => {
-                self.status = "deleted".to_string();
+                self.set_status("deleted".to_string());
                 self.detail = None;
                 self.media_items = self.client.list_media().await.unwrap_or_default();
                 self.recompute_library_view();
             }
-            Err(e) => self.status = format!("delete failed: {e}"),
+            Err(e) => self.set_status(format!("delete failed: {e}")),
         }
     }
 
@@ -1057,7 +1255,7 @@ impl App {
         };
         if !self.confirm_delete_file {
             self.confirm_delete_file = true;
-            self.status = "press d again to confirm deleting this file".to_string();
+            self.set_status("press d again to confirm deleting this file".to_string());
             return;
         }
         self.confirm_delete_file = false;
@@ -1075,14 +1273,14 @@ impl App {
         };
         match result {
             Ok(()) => {
-                self.status = "file deleted, will be re-searched".to_string();
+                self.set_status("file deleted, will be re-searched".to_string());
                 if let Some(id) = self.selected_media_id() {
                     if let Ok(fresh) = self.client.media_detail(id).await {
                         self.detail = Some(fresh);
                     }
                 }
             }
-            Err(e) => self.status = format!("file delete failed: {e}"),
+            Err(e) => self.set_status(format!("file delete failed: {e}")),
         }
     }
 
@@ -1118,14 +1316,51 @@ impl App {
                 self.detail = Some(detail);
                 self.focus = Focus::List;
             }
-            Err(e) => self.status = format!("error loading detail: {e}"),
+            Err(e) => self.set_status(format!("error loading detail: {e}")),
+        }
+    }
+
+    /// Jumps from the selected Calendar row to that episode's Library
+    /// detail — same idea as `jump_to_stuck_target`, but also lands on the
+    /// matching SxxExx so `c`/`d` apply to the aired episode, not S01E01.
+    pub async fn jump_to_calendar_entry(&mut self) {
+        let Some(idx) = self.calendar_state.selected() else {
+            return;
+        };
+        let Some(entry) = self.calendar.get(idx).cloned() else {
+            return;
+        };
+        match self.client.media_detail(entry.media_item_id).await {
+            Ok(detail) => {
+                let ep = detail.episodes.iter().position(|e| {
+                    e.season_number == entry.season_number
+                        && e.episode_number == entry.episode_number
+                });
+                self.tab = Tab::Library;
+                self.episode_state
+                    .select(ep.or(if detail.episodes.is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    }));
+                self.detail = Some(detail);
+                self.focus = Focus::List;
+            }
+            Err(e) => self.set_status(format!("error loading detail: {e}")),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::item_root_folder;
+    use super::{
+        clamp_list_state, health_row_count, item_root_folder, next_missing_index,
+        title_matches_query,
+    };
+    use breadarr_shared::dto::{
+        DuplicateGroup, EpisodeSummary, FlaggedFile, LibraryHealthReport, LibrarySummary,
+    };
+    use ratatui::widgets::ListState;
 
     #[test]
     fn item_root_folder_replaces_dot_and_dotdot() {
@@ -1140,5 +1375,100 @@ mod tests {
             item_root_folder("/lib", "Foo: Bar/Baz", Some(2020)),
             "/lib/Foo_ Bar_Baz (2020)"
         );
+    }
+
+    #[test]
+    fn title_matches_query_is_case_insensitive_substring() {
+        assert!(title_matches_query("The Matrix", "matrix"));
+        assert!(title_matches_query("The Matrix", ""));
+        assert!(!title_matches_query("The Matrix", "inception"));
+    }
+
+    fn ep(season: i64, number: i64, monitored: bool, has_file: bool) -> EpisodeSummary {
+        EpisodeSummary {
+            id: season * 100 + number,
+            season_number: season,
+            episode_number: number,
+            title: None,
+            air_date: None,
+            monitored,
+            has_file,
+        }
+    }
+
+    #[test]
+    fn next_missing_index_wraps_and_skips_owned_or_unmonitored() {
+        let episodes = vec![
+            ep(1, 1, true, true),
+            ep(1, 2, true, false),
+            ep(1, 3, false, false),
+            ep(1, 4, true, false),
+        ];
+        assert_eq!(next_missing_index(&episodes, 0), Some(1));
+        assert_eq!(next_missing_index(&episodes, 2), Some(3));
+        assert_eq!(next_missing_index(&episodes, 4), Some(1));
+        assert_eq!(next_missing_index(&[], 0), None);
+        assert_eq!(
+            next_missing_index(&[ep(1, 1, true, true), ep(1, 2, false, false)], 0),
+            None
+        );
+    }
+
+    #[test]
+    fn clamp_list_state_pins_past_the_end_and_clears_empty() {
+        let mut state = ListState::default();
+        state.select(Some(4));
+        clamp_list_state(&mut state, 3);
+        assert_eq!(state.selected(), Some(2));
+        clamp_list_state(&mut state, 0);
+        assert_eq!(state.selected(), None);
+        clamp_list_state(&mut state, 2);
+        assert_eq!(state.selected(), Some(0));
+    }
+
+    fn empty_health() -> LibraryHealthReport {
+        LibraryHealthReport {
+            corrupt_files: vec![],
+            under_quality_files: vec![],
+            no_subtitle_files: vec![],
+            no_english_audio_files: vec![],
+            non_english_default_audio_files: vec![],
+            duplicate_groups: vec![],
+            summary: LibrarySummary {
+                total_files: 0,
+                total_size_bytes: 0,
+                probed_files: 0,
+                by_video_codec: vec![],
+                sd_count: 0,
+                hd_720p_count: 0,
+                full_hd_1080p_count: 0,
+                uhd_4k_count: 0,
+                pct_with_subtitles: 0.0,
+            },
+        }
+    }
+
+    fn flagged(title: &str) -> FlaggedFile {
+        FlaggedFile {
+            episode_file_id: 1,
+            media_title: title.to_string(),
+            episode_label: None,
+            path: "/x".to_string(),
+        }
+    }
+
+    #[test]
+    fn health_row_count_includes_headers_and_empty_placeholder() {
+        let mut report = empty_health();
+        assert_eq!(health_row_count(&report), 1);
+        report.corrupt_files.push(flagged("A"));
+        report.corrupt_files.push(flagged("B"));
+        report.duplicate_groups.push(DuplicateGroup {
+            media_title: "C".into(),
+            episode_label: None,
+            paths: vec!["/a".into(), "/b".into()],
+        });
+        // header + 2 files + header + 1 group
+        assert_eq!(health_row_count(&report), 5);
     }
 }

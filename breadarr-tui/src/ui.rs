@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs};
 use ratatui::Frame;
 
 use crate::app::{App, Focus, StuckSection, Tab};
+use breadarr_shared::dto::CycleInfo;
 
 // Shared color palette — kept to these meanings so a color never has to be
 // second-guessed at a glance:
@@ -58,6 +59,7 @@ fn context_keybindings(app: &App) -> Vec<(&'static str, &'static str)> {
         Tab::Library if app.detail.is_some() => vec![
             ("Esc", "back"),
             ("s", "search now"),
+            ("n", "next missing"),
             ("m", "monitor show"),
             ("e", "monitor episode"),
             ("S", "monitor season"),
@@ -65,8 +67,12 @@ fn context_keybindings(app: &App) -> Vec<(&'static str, &'static str)> {
             ("d", "delete file"),
             ("c", "pick release"),
         ],
+        Tab::Library if matches!(app.focus, Focus::LibraryFilterInput) => {
+            vec![("Enter", "keep filter"), ("Esc", "clear filter")]
+        }
         Tab::Library => vec![
             ("Enter", "open detail"),
+            ("/", "filter title"),
             ("f", "cycle filter"),
             ("o", "cycle sort"),
             ("m", "monitor toggle"),
@@ -81,13 +87,17 @@ fn context_keybindings(app: &App) -> Vec<(&'static str, &'static str)> {
         }
         Tab::Profiles => vec![("Enter", "open profile")],
         Tab::Stuck => vec![("Left/Right", "switch section"), ("Enter", "jump to show")],
+        Tab::Calendar => vec![("Enter", "jump to show")],
         _ => vec![],
     }
 }
 
 const GLOBAL_KEYS: &[(&str, &str)] = &[
-    ("Tab", "switch tab"),
+    ("Tab/S-Tab", "switch tab"),
+    ("1-8", "jump tab"),
     ("j/k", "move"),
+    ("g/G", "first/last"),
+    ("PgUp/PgDn", "page"),
     ("?", "help"),
     ("R", "refresh now"),
     ("q", "quit"),
@@ -128,7 +138,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
         ])
     }));
 
-    let popup = centered_rect(50, lines.len() as u16 + 2, area);
+    let popup = centered_rect(52, lines.len() as u16 + 2, area);
     frame.render_widget(Clear, popup);
     let paragraph = Paragraph::new(lines).block(
         Block::default()
@@ -138,8 +148,47 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, popup);
 }
 
+fn tab_label(tab: Tab, app: &App) -> String {
+    match tab {
+        Tab::Library => {
+            let missing: i64 = app.media_items.iter().map(|m| m.missing_count).sum();
+            if missing > 0 {
+                format!("Library ({missing})")
+            } else {
+                tab.title().to_string()
+            }
+        }
+        Tab::Review => {
+            let n = if matches!(app.tab, Tab::Review) {
+                app.review_items.len()
+            } else {
+                app.review_count
+            };
+            if n > 0 {
+                format!("Review ({n})")
+            } else {
+                tab.title().to_string()
+            }
+        }
+        Tab::Stuck => {
+            let n = app.stuck.as_ref().map_or(app.stuck_count, |r| {
+                r.stalled_grabs.len() + r.maxed_out_search_targets.len()
+            });
+            if n > 0 {
+                format!("Stuck ({n})")
+            } else {
+                tab.title().to_string()
+            }
+        }
+        _ => tab.title().to_string(),
+    }
+}
+
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
-    let titles: Vec<Line> = Tab::ALL.iter().map(|t| Line::from(t.title())).collect();
+    let titles: Vec<Line> = Tab::ALL
+        .iter()
+        .map(|t| Line::from(tab_label(*t, app)))
+        .collect();
     let selected = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
 
     let (daemon_label, daemon_color) = match (&app.daemon_up, &app.health) {
@@ -187,6 +236,11 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(detail) = &app.detail {
         if matches!(app.focus, Focus::Candidates) {
             draw_candidates(frame, area, app, &detail.title);
+            return;
+        }
+
+        if detail.kind == "movie" || detail.episodes.is_empty() {
+            draw_movie_detail(frame, area, app, detail);
             return;
         }
 
@@ -286,9 +340,19 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
             ]))
         })
         .collect();
+    let search = if app.library_query.is_empty() {
+        String::new()
+    } else {
+        format!("  search: {}", app.library_query)
+    };
+    let filter_caret = if matches!(app.focus, Focus::LibraryFilterInput) {
+        "▋"
+    } else {
+        ""
+    };
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "Monitored Shows ({}/{}) — filter: {}  sort: {}",
+            "Library ({}/{}) — filter: {}  sort: {}{search}{filter_caret}",
             app.library_view.len(),
             app.media_items.len(),
             app.library_filter.label(),
@@ -297,6 +361,61 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = app.media_state.clone();
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_movie_detail(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    detail: &breadarr_shared::dto::MediaItemDetail,
+) {
+    let confirm = if app.confirm_delete {
+        " — x AGAIN TO DELETE"
+    } else if app.confirm_delete_file {
+        " — d AGAIN TO DELETE FILE"
+    } else {
+        ""
+    };
+    let monitor_label = if detail.monitored {
+        "monitored"
+    } else {
+        "unmonitored"
+    };
+    let have = app
+        .media_items
+        .iter()
+        .find(|m| m.id == detail.id)
+        .map(|m| m.missing_count == 0);
+    let file_line = match have {
+        Some(true) => ("file on disk", Color::Green),
+        Some(false) => ("missing", Color::Yellow),
+        None => ("file status unknown", Color::DarkGray),
+    };
+    let kind = if detail.kind == "movie" {
+        "Movie"
+    } else {
+        "Series"
+    };
+    let year = detail
+        .year
+        .map(|y| y.to_string())
+        .unwrap_or_else(|| "—".into());
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("{} ({year})", detail.title),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(format!("{kind}  ·  {monitor_label}")),
+        Line::from(Span::styled(file_line.0, Style::default().fg(file_line.1))),
+        Line::from(format!("root: {}", detail.root_folder)),
+        Line::from(""),
+        Line::from("s search now   c pick release   m monitor   d delete file   x remove"),
+    ];
+    let paragraph = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(
+        format!("{} ({year}) [{monitor_label}]{confirm}", detail.title),
+    ));
+    frame.render_widget(paragraph, area);
 }
 
 /// Manual release picker — candidates for whatever episode/movie was
@@ -330,15 +449,19 @@ fn draw_candidates(frame: &mut Frame, area: Rect, app: &App, media_title: &str) 
                 if c.is_season_pack { " [PACK]" } else { "" },
                 if c.is_repack { " [REPACK]" } else { "" },
             );
-            let verdict = match (c.score, &c.rejected_reason) {
-                (Some(score), _) => format!("score {score:.1}"),
-                (None, Some(reason)) => format!("REJECTED: {reason}"),
-                (None, None) => "unscored".to_string(),
+            let (verdict, color) = match (c.score, &c.rejected_reason) {
+                (Some(score), _) if score >= 8.0 => (format!("score {score:.1}"), Color::Green),
+                (Some(score), _) => (format!("score {score:.1}"), Color::Yellow),
+                (None, Some(reason)) => (format!("REJECTED: {reason}"), Color::Red),
+                (None, None) => ("unscored".to_string(), Color::DarkGray),
             };
-            ListItem::new(format!(
-                "[{}] {} — {seeders} seeders, {size}{flags} — {verdict}",
-                c.source_name, c.raw_title
-            ))
+            ListItem::new(Line::from(vec![
+                Span::raw(format!(
+                    "[{}] {} — {seeders} seeders, {size}{flags} — ",
+                    c.source_name, c.raw_title
+                )),
+                Span::styled(verdict, Style::default().fg(color)),
+            ]))
         })
         .collect();
     let list = List::new(items)
@@ -350,18 +473,32 @@ fn draw_candidates(frame: &mut Frame, area: Rect, app: &App, media_title: &str) 
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+fn history_status_color(status: &str) -> Color {
+    match status {
+        "imported" => Color::Green,
+        "grabbed" => Color::Yellow,
+        "failed" => Color::Red,
+        _ => Color::DarkGray,
+    }
+}
+
 fn draw_history(frame: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = app
         .releases
         .iter()
         .map(|r| {
-            ListItem::new(format!(
-                "[{}] {} — {} (score {:.1})",
-                r.status,
-                r.media_title,
-                r.raw_title,
-                r.score.unwrap_or(0.0)
-            ))
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("[{}]", r.status),
+                    Style::default().fg(history_status_color(&r.status)),
+                ),
+                Span::raw(format!(
+                    " {} — {} (score {:.1})",
+                    r.media_title,
+                    r.raw_title,
+                    r.score.unwrap_or(0.0)
+                )),
+            ]))
         })
         .collect();
     let list = List::new(items)
@@ -384,7 +521,10 @@ fn draw_review(frame: &mut Frame, area: Rect, app: &App) {
                 Color::Green
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("({:.0}%)", r.confidence * 100.0), Style::default().fg(color)),
+                Span::styled(
+                    format!("({:.0}%)", r.confidence * 100.0),
+                    Style::default().fg(color),
+                ),
                 Span::raw(format!(
                     " {} -> {}",
                     r.raw_release_title,
@@ -439,7 +579,10 @@ fn draw_stuck(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|g| {
             ListItem::new(Line::from(Span::styled(
-                format!("{} — {} (grabbed {})", g.media_title, g.raw_title, g.grabbed_at),
+                format!(
+                    "{} — {} (grabbed {})",
+                    g.media_title, g.raw_title, g.grabbed_at
+                ),
                 Style::default().fg(Color::Yellow),
             )))
         })
@@ -519,12 +662,21 @@ fn draw_add(frame: &mut Frame, area: Rect, app: &App) {
         .add_results
         .iter()
         .map(|r| {
-            ListItem::new(format!(
-                "[{}] {} ({})",
-                r.kind.label(),
-                r.result.title,
-                r.result.year.map(|y| y.to_string()).unwrap_or_default()
-            ))
+            let kind_color = match r.kind {
+                crate::app::AddKind::Movie => Color::Magenta,
+                crate::app::AddKind::Series => Color::Blue,
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("[{}] ", r.kind.label()),
+                    Style::default().fg(kind_color),
+                ),
+                Span::raw(format!(
+                    "{} ({})",
+                    r.result.title,
+                    r.result.year.map(|y| y.to_string()).unwrap_or_default()
+                )),
+            ]))
         })
         .collect();
     let list = List::new(items)
@@ -539,36 +691,43 @@ fn draw_add(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// What's aired recently or airs soon (a week back, three weeks forward —
-/// see `calendar::DAYS_PAST`/`DAYS_FUTURE` server-side). Read-only, no
-/// selection — a lookahead view, not something acted on directly here.
+/// see `calendar::DAYS_PAST`/`DAYS_FUTURE` server-side). Selectable —
+/// Enter jumps to that episode in Library.
 fn draw_calendar(frame: &mut Frame, area: Rect, app: &App) {
     let today = chrono::Local::now().date_naive().to_string();
     let items: Vec<ListItem> = app
         .calendar
         .iter()
         .map(|e| {
-            let status = if e.has_file {
-                "✓"
+            let (status, color) = if e.has_file {
+                ("✓", Color::Green)
             } else if !e.monitored {
-                "-"
+                ("-", Color::DarkGray)
             } else if e.air_date.as_str() > today.as_str() {
-                "…"
+                ("…", Color::Yellow)
             } else {
-                "!" // aired, monitored, still missing
+                ("!", Color::Red)
             };
+            let today_mark = if e.air_date == today { "  today" } else { "" };
             let title = e.title.as_deref().unwrap_or("");
-            ListItem::new(format!(
-                "{status} {}  {}  S{:02}E{:02}  {title}",
-                e.air_date, e.media_title, e.season_number, e.episode_number
-            ))
+            ListItem::new(Line::from(vec![
+                Span::styled(status, Style::default().fg(color)),
+                Span::raw(format!(
+                    " {}  {}  S{:02}E{:02}  {title}{today_mark}",
+                    e.air_date, e.media_title, e.season_number, e.episode_number
+                )),
+            ]))
         })
         .collect();
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Calendar — ✓ have it  … upcoming  ! aired but missing"),
-    );
-    frame.render_widget(list, area);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Calendar — Enter: jump  ✓ have it  … upcoming  ! aired but missing"),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state = app.calendar_state.clone();
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 /// Read-only report on `media_file_probe` state: corruption, under-quality,
@@ -588,7 +747,7 @@ fn draw_library_health(frame: &mut Frame, area: Rect, app: &App) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(3)])
+        .constraints([Constraint::Length(6), Constraint::Min(3)])
         .split(area);
 
     let s = &report.summary;
@@ -598,8 +757,13 @@ fn draw_library_health(frame: &mut Frame, area: Rect, app: &App) {
         .map(|c| format!("{}={}", c.codec, c.count))
         .collect::<Vec<_>>()
         .join(", ");
+    let cycles = app
+        .health
+        .as_ref()
+        .map(cycle_summary_line)
+        .unwrap_or_default();
     let summary_text = format!(
-        "{} files, {:.1} GB total, {} probed — resolution: SD={} 720p={} 1080p={} 4K={} \
+        "{cycles}\n{} files, {:.1} GB total, {} probed — resolution: SD={} 720p={} 1080p={} 4K={} \
          — subtitles: {:.0}% — codecs: {codec_summary}",
         s.total_files,
         s.total_size_bytes as f64 / 1_073_741_824.0,
@@ -668,12 +832,38 @@ fn draw_library_health(frame: &mut Frame, area: Rect, app: &App) {
         items.push(ListItem::new("Nothing flagged — library looks clean."));
     }
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Flagged files"),
-    );
-    frame.render_widget(list, chunks[1]);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Flagged files"),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state = app.health_state.clone();
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+fn cycle_bit(name: &str, info: &Option<CycleInfo>) -> String {
+    match info {
+        Some(c) if c.ok => format!("{name}: ok"),
+        Some(_) => format!("{name}: FAIL"),
+        None => format!("{name}: —"),
+    }
+}
+
+fn cycle_summary_line(h: &breadarr_shared::dto::HealthDetail) -> String {
+    format!(
+        "{}  |  {}  |  {}  |  {}{}",
+        cycle_bit("grab", &h.last_grab_cycle),
+        cycle_bit("import", &h.last_import_cycle),
+        cycle_bit("search", &h.last_search_cycle),
+        cycle_bit("upgrade", &h.last_upgrade_cycle),
+        if h.search_halted {
+            "  |  search HALTED"
+        } else {
+            ""
+        }
+    )
 }
 
 /// Quality-profile weight editing — list of profiles, then (once one is

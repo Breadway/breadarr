@@ -54,13 +54,13 @@ Install via bakery (`bakery install breadarr`) on a homelab host, or build from 
 
 ## Using the TUI
 
-`Tab` cycles Library / History / Review Queue / Add Show / Stuck / Calendar / Health / Profiles. `j`/`k` or arrow keys navigate, `Enter` opens detail or runs a search, `Esc` backs out.
+`Tab` / `Shift+Tab` cycle Library / History / Review / Add / Stuck / Calendar / Health / Profiles; `1`–`8` jump straight to a tab. `j`/`k` or arrows move, `g`/`G` jump to first/last, `PgUp`/`PgDn` page, `Enter` opens detail or runs a search, `Esc` backs out. `?` is the full key list.
 
-- **Review Queue** — `a` approves and `r` rejects a pending low-confidence title match. Check this periodically, especially early on.
-- **Library** (with an item's detail open) — `s` triggers an immediate search-now pass for that item's backlog; `m`/`e`/`S` toggle monitored on the show/episode/season respectively; `x` (confirm with a second `x`) removes the item from tracking without touching files on disk; `d` (confirm with a second `d`) deletes a bad imported file from disk and clears its tracking, freeing the episode/movie to be re-grabbed on the next cycle — the redownload path for a file that turned out to be wrong or broken; `c` fetches the manual release picker for the selected episode/movie, `Enter` grabs the highlighted candidate, `Esc` cancels.
-- **Stuck** — surfaces grabs that look stalled (no download progress advancing, or missing from qBittorrent) before the daemon's own auto-fail timers would catch them.
-- **Calendar** — upcoming/recently-aired episodes in a roughly week-either-side window.
-- **Health** — the library-health report (see below) rendered as a tab instead of curled by hand.
+- **Review** — `a` approves and `r` rejects a pending low-confidence title match. The tab title badges the pending count. Check this periodically, especially early on.
+- **Library** — `/` incrementally filters the list by title; `f`/`o` cycle kind-filter and sort. With an item's detail open: `s` triggers an immediate search-now pass for that item's backlog; `n` jumps to the next missing monitored episode; `m`/`e`/`S` toggle monitored on the show/episode/season respectively; `x` (confirm with a second `x`) removes the item from tracking without touching files on disk; `d` (confirm with a second `d`) deletes a bad imported file from disk and clears its tracking, freeing the episode/movie to be re-grabbed on the next cycle — the redownload path for a file that turned out to be wrong or broken; `c` fetches the manual release picker for the selected episode/movie, `Enter` grabs the highlighted candidate, `Esc` cancels. Movies (no episode list) show a summary pane with the same keys.
+- **Stuck** — surfaces grabs that look stalled (no download progress advancing, or missing from qBittorrent) before the daemon's own auto-fail timers would catch them. `Enter` jumps to that show.
+- **Calendar** — upcoming/recently-aired episodes in a roughly week-either-side window. `Enter` opens the matching episode.
+- **Health** — daemon cycle outcomes plus the library-health report (see below), scrollable.
 - **Profiles** — quality-profile weight axes; open a profile and edit a weight in place.
 
 ## Operational notes
