@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use breadarr_shared::{Config, DaemonClient};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -51,6 +51,7 @@ async fn run(
 
     loop {
         app.poll_background().await;
+        app.expire_status();
 
         if last_refresh.elapsed() >= Duration::from_secs(3) || app.force_refresh {
             app.refresh_active_tab().await;
@@ -65,7 +66,7 @@ async fn run(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                handle_key(app, key.code, roots).await;
+                handle_key(app, key, roots).await;
                 if app.should_quit {
                     return Ok(());
                 }
@@ -74,7 +75,9 @@ async fn run(
     }
 }
 
-async fn handle_key(app: &mut App, code: KeyCode, roots: &LibraryRoots) {
+async fn handle_key(app: &mut App, key: KeyEvent, roots: &LibraryRoots) {
+    let code = key.code;
+
     // Typing into the add-show search box takes priority over global keys.
     if matches!(app.tab, Tab::Add) && matches!(app.focus, Focus::AddSearchInput) {
         match code {
@@ -86,7 +89,28 @@ async fn handle_key(app: &mut App, code: KeyCode, roots: &LibraryRoots) {
             KeyCode::Esc => {
                 app.add_query.clear();
             }
-            KeyCode::Tab => cycle_tab(app),
+            KeyCode::Tab => switch_tab(app, tab_offset(app.tab, 1)),
+            KeyCode::BackTab => switch_tab(app, tab_offset(app.tab, -1)),
+            _ => {}
+        }
+        return;
+    }
+
+    // Incremental Library title filter — same input-mode isolation as Add.
+    if matches!(app.tab, Tab::Library) && matches!(app.focus, Focus::LibraryFilterInput) {
+        match code {
+            KeyCode::Enter => app.confirm_library_filter(),
+            KeyCode::Char(c) => {
+                app.library_query.push(c);
+                app.recompute_library_view();
+            }
+            KeyCode::Backspace => {
+                app.library_query.pop();
+                app.recompute_library_view();
+            }
+            KeyCode::Esc => app.clear_library_filter(),
+            KeyCode::Tab => switch_tab(app, tab_offset(app.tab, 1)),
+            KeyCode::BackTab => switch_tab(app, tab_offset(app.tab, -1)),
             _ => {}
         }
         return;
@@ -131,12 +155,25 @@ async fn handle_key(app: &mut App, code: KeyCode, roots: &LibraryRoots) {
 
     match code {
         KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Tab => cycle_tab(app),
+        KeyCode::Tab => switch_tab(app, tab_offset(app.tab, 1)),
+        KeyCode::BackTab => switch_tab(app, tab_offset(app.tab, -1)),
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Some(n) = c.to_digit(10) {
+                if (1..=Tab::ALL.len() as u32).contains(&n) {
+                    switch_tab(app, Tab::ALL[(n as usize) - 1]);
+                }
+            }
+        }
         KeyCode::Char('j') | KeyCode::Down => app.move_selection(1),
         KeyCode::Char('k') | KeyCode::Up => app.move_selection(-1),
+        KeyCode::Char('g') => app.select_edge(false),
+        KeyCode::Char('G') => app.select_edge(true),
+        KeyCode::PageDown => app.move_selection(10),
+        KeyCode::PageUp => app.move_selection(-10),
         KeyCode::Esc => match app.tab {
             Tab::Library if matches!(app.focus, Focus::Candidates) => app.close_candidates(),
             Tab::Library if app.detail.is_some() => app.close_detail(),
+            Tab::Library if !app.library_query.is_empty() => app.clear_library_filter(),
             Tab::Add => app.focus = Focus::AddSearchInput,
             Tab::Profiles if app.profile_detail.is_some() => app.close_profile_detail(),
             _ => {}
@@ -155,6 +192,7 @@ async fn handle_key(app: &mut App, code: KeyCode, roots: &LibraryRoots) {
             }
             Tab::Profiles => app.open_profile_detail(),
             Tab::Stuck => app.jump_to_stuck_target().await,
+            Tab::Calendar => app.jump_to_calendar_entry().await,
             _ => {}
         },
         KeyCode::Left | KeyCode::Right if matches!(app.tab, Tab::Stuck) => {
@@ -181,6 +219,16 @@ async fn handle_key(app: &mut App, code: KeyCode, roots: &LibraryRoots) {
         }
         KeyCode::Char('r') if matches!(app.tab, Tab::Review) => {
             app.reject_selected_review().await;
+        }
+        KeyCode::Char('/') if matches!(app.tab, Tab::Library) && app.detail.is_none() => {
+            app.start_library_filter();
+        }
+        KeyCode::Char('n')
+            if matches!(app.tab, Tab::Library)
+                && app.detail.is_some()
+                && !matches!(app.focus, Focus::Candidates) =>
+        {
+            app.select_next_missing_episode();
         }
         KeyCode::Char('s') if matches!(app.tab, Tab::Library) && app.detail.is_some() => {
             app.search_now_selected().await;
@@ -211,9 +259,20 @@ async fn handle_key(app: &mut App, code: KeyCode, roots: &LibraryRoots) {
     }
 }
 
-fn cycle_tab(app: &mut App) {
-    let idx = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
-    app.tab = Tab::ALL[(idx + 1) % Tab::ALL.len()];
+fn tab_offset(current: Tab, delta: i32) -> Tab {
+    let idx = Tab::ALL.iter().position(|t| *t == current).unwrap_or(0) as i32;
+    let len = Tab::ALL.len() as i32;
+    Tab::ALL[(idx + delta).rem_euclid(len) as usize]
+}
+
+fn switch_tab(app: &mut App, tab: Tab) {
+    if app.tab == tab {
+        return;
+    }
+    if matches!(app.focus, Focus::Candidates) {
+        app.close_candidates();
+    }
+    app.tab = tab;
     app.detail = None;
     app.profile_detail = None;
     app.profile_weight_state.select(None);
