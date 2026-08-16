@@ -652,7 +652,8 @@ async fn process_item(
         return Ok(ProcessOutcome::QueuedForReview);
     }
 
-    let release_score = scoring::score(&parsed, item.seeders.unwrap_or(0), parsed.has_hdr, &profile);
+    let release_score =
+        scoring::score(&parsed, item.seeders.unwrap_or(0), parsed.has_hdr, &profile);
     let existing_best = match (episode_id, season_pack_number) {
         (Some(eid), _) => best_existing_score(conn, eid)?,
         (None, Some(season)) => best_existing_season_pack_score(conn, media_item.id, season)?,
@@ -911,8 +912,8 @@ pub async fn run_grab_cycle(
     Ok(stats)
 }
 
-// --- Search-driven acquisition (1337x for general TV/movies, nyaa search
-// for anime movies) ---
+// --- Search-driven acquisition (TPB + YTS/csv/1337x fallbacks for
+// general TV/movies, nyaa search for anime movies) ---
 //
 // Unlike the feed-based path above, there's no natural stream of "new"
 // items to dedup against — the recurring cost here is the *search itself*,
@@ -921,18 +922,12 @@ pub async fn run_grab_cycle(
 // single cycle; cadence backs off exponentially (6h, 12h, 24h, 48h, 96h,
 // capped at a week) the more times it's been searched without success.
 
-/// Other general-content sources considered and rejected (live-tested
-/// 2026-07-12, not just assumed) before landing on TPB as primary:
-/// - **YTS** (`yts.mx`): DNS doesn't resolve at all. Every known mirror
-///   (`yts.am`, `yts.ag`, `yts.lt`, `yts.pe`) either 301s in a loop or drops
-///   the query and lands on a bare homepage. The whole mirror network looks
-///   dead, not just one domain — re-check before assuming a fix is quick.
-/// - **EZTV** (`eztv.re`): redirects to `eztvx.to`, which fails to connect
-///   outright (TLS/connection error, not a slow response). Also
-///   Cloudflare-fronted, so even if connectivity is restored it carries the
-///   same risk profile 1337x does.
-///   If revisiting either, re-verify connectivity first — this isn't a
-///   permanent architectural decision, just what was true when checked.
+/// General-content fallbacks live-tested 2026-08-16 (TPB/apibay was
+/// timing out; every configured 1337x mirror returned Cloudflare 521):
+/// - **torrents-csv** and **YTS** (`yts.lt` API — `yts.mx` still does not
+///   resolve) are JSON hash-to-magnet sources, same grab shape as TPB.
+/// - **EZTV**'s JSON API is up but IMDb-id only; name search is a
+///   Cloudflare challenge. Not wired — breadarr has TMDB/TVDB, not IMDb.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SearchRoute {
     /// Primary general-content (movies + non-anime TV) route — a JSON API,
@@ -945,6 +940,22 @@ enum SearchRoute {
     #[allow(dead_code)]
     X1337,
     NyaaSearch,
+}
+
+/// The search-driven sources plus their `source` table ids — one bundle
+/// so `execute_search_targets` / `fetch_candidates` / the cycle runners
+/// don't each grow another four arguments every time a fallback is added.
+pub struct SearchSources<'a> {
+    pub tpb: &'a sources::tpb::TpbSource,
+    pub tpb_id: i64,
+    pub torrents_csv: &'a sources::torrents_csv::TorrentsCsvSource,
+    pub torrents_csv_id: i64,
+    pub yts: &'a sources::yts::YtsSource,
+    pub yts_id: i64,
+    pub scrape: &'a sources::scrape::ScrapeSource,
+    pub scrape_id: i64,
+    pub nyaa_search: &'a sources::rss::RssSource,
+    pub nyaa_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1565,35 +1576,16 @@ pub struct SearchCycleStats {
 /// single broad query can dump into the review queue.
 const MAX_RESULTS_PER_SEARCH: usize = 15;
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run_search_cycle(
     conn: &Connection,
-    tpb: &sources::tpb::TpbSource,
-    tpb_source_id: i64,
-    scrape: &sources::scrape::ScrapeSource,
-    scrape_source_id: i64,
-    nyaa_search: &sources::rss::RssSource,
-    nyaa_source_id: i64,
+    sources: &SearchSources<'_>,
     matcher: &mut TitleMatcher,
     qbit: &QbitClient,
     qbit_category: &str,
     budget: usize,
 ) -> Result<SearchCycleStats> {
     let targets = enumerate_search_targets(conn, budget)?;
-    execute_search_targets(
-        conn,
-        &targets,
-        tpb,
-        tpb_source_id,
-        scrape,
-        scrape_source_id,
-        nyaa_search,
-        nyaa_source_id,
-        matcher,
-        qbit,
-        qbit_category,
-    )
-    .await
+    execute_search_targets(conn, &targets, sources, matcher, qbit, qbit_category).await
 }
 
 /// Upgrade-search counterpart to `run_search_cycle`: same execution engine
@@ -1601,15 +1593,9 @@ pub async fn run_search_cycle(
 /// ones. `min_gain` is threaded onto every target via
 /// `enumerate_upgrade_targets`, which is what routes `process_item` into
 /// its upgrade-eligibility path instead of the normal missing-content one.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_upgrade_cycle(
     conn: &Connection,
-    tpb: &sources::tpb::TpbSource,
-    tpb_source_id: i64,
-    scrape: &sources::scrape::ScrapeSource,
-    scrape_source_id: i64,
-    nyaa_search: &sources::rss::RssSource,
-    nyaa_source_id: i64,
+    sources: &SearchSources<'_>,
     matcher: &mut TitleMatcher,
     qbit: &QbitClient,
     qbit_category: &str,
@@ -1617,20 +1603,7 @@ pub async fn run_upgrade_cycle(
     min_gain: f32,
 ) -> Result<SearchCycleStats> {
     let targets = enumerate_upgrade_targets(conn, budget, min_gain)?;
-    execute_search_targets(
-        conn,
-        &targets,
-        tpb,
-        tpb_source_id,
-        scrape,
-        scrape_source_id,
-        nyaa_search,
-        nyaa_source_id,
-        matcher,
-        qbit,
-        qbit_category,
-    )
-    .await
+    execute_search_targets(conn, &targets, sources, matcher, qbit, qbit_category).await
 }
 
 /// Every currently-missing episode/movie for one specific `media_item`,
@@ -1728,16 +1701,10 @@ pub fn find_media_item_id_by_title(conn: &Connection, title: &str) -> Result<Opt
     .map_err(Into::into)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn execute_search_targets(
     conn: &Connection,
     targets: &[SearchTarget],
-    tpb: &sources::tpb::TpbSource,
-    tpb_source_id: i64,
-    scrape: &sources::scrape::ScrapeSource,
-    scrape_source_id: i64,
-    nyaa_search: &sources::rss::RssSource,
-    nyaa_source_id: i64,
+    sources: &SearchSources<'_>,
     matcher: &mut TitleMatcher,
     qbit: &QbitClient,
     qbit_category: &str,
@@ -1753,8 +1720,8 @@ pub async fn execute_search_targets(
     // without this, a 10-episode backlog fires 10 indistinguishable
     // requests at a single-domain API with no mirror fallback, which is
     // exactly the kind of pattern that gets a source rate-limited. Caches
-    // which source actually answered too (the TPB→1337x fallback can mean
-    // two different targets with the same query string were served by two
+    // which source actually answered too (the TPB → YTS/csv/1337x chain
+    // can mean two targets with the same query were served by two
     // different sources), so a cache hit still attributes dedup/grab
     // records to the right source id.
     let mut query_cache: std::collections::HashMap<
@@ -1763,12 +1730,6 @@ pub async fn execute_search_targets(
     > = std::collections::HashMap::new();
 
     for (i, target) in targets.iter().enumerate() {
-        let (primary, primary_id): (&dyn ReleaseSource, i64) = match target.route {
-            SearchRoute::Tpb => (tpb, tpb_source_id),
-            SearchRoute::X1337 => (scrape, scrape_source_id),
-            SearchRoute::NyaaSearch => (nyaa_search, nyaa_source_id),
-        };
-
         let cache_key = (target.route, target.query.clone());
         let (items, source_id) =
             if let Some((cached_items, cached_source_id)) = query_cache.get(&cache_key) {
@@ -1779,34 +1740,11 @@ pub async fn execute_search_targets(
                     tokio::time::sleep(std::time::Duration::from_secs(jitter_secs)).await;
                 }
 
-                let primary_result = primary.fetch(Some(&target.query)).await;
-                // TPB is the primary route for general content, but a fetch
-                // *failure* there (not just "no relevant results") falls back
-                // to 1337x for the same query before giving up — keeps the
-                // mirror-rotation/cooldown machinery built for 1337x as real
-                // resilience rather than dead code, just no longer the first
-                // choice given TPB's better precision. `result_source_id`
-                // tracks which source actually produced whatever we end up
-                // with, since dedup (`is_seen`/`mark_seen`) and grab records
-                // are keyed by source id — attributing a 1337x-sourced guid to
-                // TPB's source id would silently break dedup between the two.
-                let (fetch_result, result_source_id) = match primary_result {
-                    Err(e) if matches!(target.route, SearchRoute::Tpb) => {
-                        tracing::warn!(
-                            query = %target.query,
-                            error = %e,
-                            "TPB search failed, falling back to 1337x"
-                        );
-                        (scrape.fetch(Some(&target.query)).await, scrape_source_id)
-                    }
-                    other => (other, primary_id),
-                };
-
-                match fetch_result {
-                    Ok(items) => {
+                match fetch_for_target(target, sources).await {
+                    Ok(pair) => {
                         consecutive_fetch_errors = 0;
-                        query_cache.insert(cache_key, (items.clone(), result_source_id));
-                        (items, result_source_id)
+                        query_cache.insert(cache_key, pair.clone());
+                        pair
                     }
                     Err(e) => {
                         consecutive_fetch_errors += 1;
@@ -1937,12 +1875,94 @@ pub async fn execute_search_targets(
     Ok(stats)
 }
 
-fn source_route_name(route: SearchRoute) -> &'static str {
-    match route {
-        SearchRoute::Tpb => "tpb",
-        SearchRoute::X1337 => "1337x",
-        SearchRoute::NyaaSearch => "nyaa",
+fn source_name_for_id(id: i64) -> &'static str {
+    match id {
+        1 => "nyaa",
+        2 => "1337x",
+        3 => "tpb",
+        4 => "torrents-csv",
+        5 => "yts",
+        _ => "unknown",
     }
+}
+
+/// TPB first; on failure *or* empty results, walk the supplement chain
+/// (torrents-csv for everything, YTS for movies, 1337x last). Empty is
+/// treated as "try the next one" so a live-but-empty apibay doesn't hide
+/// a title that YTS/csv actually has. Dedup/grabs use whichever source
+/// actually answered.
+async fn fetch_for_target(
+    target: &SearchTarget,
+    sources: &SearchSources<'_>,
+) -> Result<(Vec<RawReleaseItem>, i64)> {
+    match target.route {
+        SearchRoute::NyaaSearch => Ok((
+            sources.nyaa_search.fetch(Some(&target.query)).await?,
+            sources.nyaa_id,
+        )),
+        SearchRoute::X1337 => Ok((
+            sources.scrape.fetch(Some(&target.query)).await?,
+            sources.scrape_id,
+        )),
+        SearchRoute::Tpb => fetch_general_content(target, sources).await,
+    }
+}
+
+async fn fetch_general_content(
+    target: &SearchTarget,
+    sources: &SearchSources<'_>,
+) -> Result<(Vec<RawReleaseItem>, i64)> {
+    let is_movie = target.episode_id.is_none();
+    let mut attempts: Vec<(&dyn ReleaseSource, i64, &'static str)> =
+        vec![(sources.tpb, sources.tpb_id, "tpb")];
+    if is_movie {
+        attempts.push((sources.yts, sources.yts_id, "yts"));
+    }
+    attempts.push((
+        sources.torrents_csv,
+        sources.torrents_csv_id,
+        "torrents-csv",
+    ));
+    attempts.push((sources.scrape, sources.scrape_id, "1337x"));
+
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut any_ok = false;
+    for (src, id, name) in attempts {
+        match src.fetch(Some(&target.query)).await {
+            Ok(items) if !items.is_empty() => {
+                if name != "tpb" {
+                    tracing::info!(
+                        query = %target.query,
+                        source = name,
+                        n = items.len(),
+                        "search fallback produced results"
+                    );
+                }
+                return Ok((items, id));
+            }
+            Ok(_) => {
+                any_ok = true;
+                tracing::debug!(
+                    query = %target.query,
+                    source = name,
+                    "search source returned no results"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    query = %target.query,
+                    source = name,
+                    error = %e,
+                    "search source failed"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    if any_ok {
+        return Ok((Vec::new(), sources.tpb_id));
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("all general-content sources failed")))
 }
 
 /// Fetches and scores (or gate-rejects) candidates for one search target —
@@ -1954,29 +1974,18 @@ fn source_route_name(route: SearchRoute) -> &'static str {
 /// episode/movie right now (already owned, unmonitored, or mid-grab) —
 /// same "nothing to do" cases `enumerate_search_targets_for_media_item`
 /// already excludes.
-#[allow(clippy::too_many_arguments)]
 pub async fn fetch_candidates(
     conn: &Connection,
     media_item_id: i64,
     episode_id: Option<i64>,
-    tpb: &sources::tpb::TpbSource,
-    tpb_source_id: i64,
-    scrape: &sources::scrape::ScrapeSource,
-    scrape_source_id: i64,
-    nyaa_search: &sources::rss::RssSource,
-    nyaa_source_id: i64,
+    sources: &SearchSources<'_>,
 ) -> Result<Vec<breadarr_shared::dto::ReleaseCandidate>> {
     let targets = enumerate_search_targets_for_media_item(conn, media_item_id)?;
     let Some(target) = targets.into_iter().find(|t| t.episode_id == episode_id) else {
         return Ok(Vec::new());
     };
 
-    let (source, source_id): (&dyn ReleaseSource, i64) = match target.route {
-        SearchRoute::Tpb => (tpb, tpb_source_id),
-        SearchRoute::X1337 => (scrape, scrape_source_id),
-        SearchRoute::NyaaSearch => (nyaa_search, nyaa_source_id),
-    };
-    let items = source.fetch(Some(&target.query)).await?;
+    let (items, source_id) = fetch_for_target(&target, sources).await?;
 
     let media_item = get_media_item(conn, media_item_id)?;
     let anime = match media_item.tvdb_id {
@@ -2029,7 +2038,7 @@ pub async fn fetch_candidates(
             link: item.link.clone(),
             guid: item.guid.clone(),
             source_id,
-            source_name: source_route_name(target.route).to_string(),
+            source_name: source_name_for_id(source_id).to_string(),
             seeders: item.seeders,
             leechers: item.leechers,
             size_bytes: item.size_bytes,

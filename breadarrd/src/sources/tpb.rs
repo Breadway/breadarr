@@ -2,18 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{urlencode, RawReleaseItem, ReleaseSource};
-
-/// A valid BitTorrent v1 info_hash: 40 hex chars or 32 base32 chars — same
-/// shape `qbit::extract_btih` accepts out of a magnet URI. Checked before
-/// building a magnet from `info_hash` at all: apibay is normally reliable,
-/// but a malformed value would otherwise silently produce a magnet
-/// `extract_btih` can't parse back out, downgrading that grab to the slow
-/// ~30s `torrents/info` polling path with no visible error anywhere.
-fn is_valid_info_hash(hash: &str) -> bool {
-    (hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
-        || (hash.len() == 32 && hash.bytes().all(|b| matches!(b, b'2'..=b'7' | b'a'..=b'z' | b'A'..=b'Z')))
-}
+use super::{build_magnet, is_valid_info_hash, urlencode, RawReleaseItem, ReleaseSource};
 
 /// A community-run JSON API mirror of The Pirate Bay's search — unlike
 /// 1337x, this is a genuine machine-readable API (not HTML scraping), and
@@ -36,23 +25,6 @@ struct TpbResult {
     seeders: String,
     leechers: String,
     size: String,
-}
-
-const TRACKERS: &[&str] = &[
-    "udp://tracker.opentrackr.org:1337/announce",
-    "udp://open.stealth.si:80/announce",
-    "udp://tracker.torrent.eu.org:451/announce",
-    "udp://tracker.openbittorrent.com:6969/announce",
-    "udp://exodus.desync.com:6969/announce",
-];
-
-fn build_magnet(info_hash: &str, name: &str) -> String {
-    let mut magnet = format!("magnet:?xt=urn:btih:{info_hash}&dn={}", urlencode(name));
-    for t in TRACKERS {
-        magnet.push_str("&tr=");
-        magnet.push_str(&urlencode(t));
-    }
-    magnet
 }
 
 impl TpbSource {
@@ -154,7 +126,9 @@ mod tests {
 
     #[test]
     fn is_valid_info_hash_accepts_both_real_shapes() {
-        assert!(is_valid_info_hash("8F87C7C186172F17E35F4512BB1A3E93B614ADED")); // 40 hex
+        assert!(is_valid_info_hash(
+            "8F87C7C186172F17E35F4512BB1A3E93B614ADED"
+        )); // 40 hex
         assert!(is_valid_info_hash("abcdefghijklmnopqrstuvwxyz234567")); // 32 base32
     }
 
@@ -167,7 +141,11 @@ mod tests {
     fn is_valid_info_hash_rejects_malformed_values() {
         assert!(!is_valid_info_hash(""));
         assert!(!is_valid_info_hash("too-short"));
-        assert!(!is_valid_info_hash("not-a-hex-string-at-all-nope!!!!!!!!!!!!")); // 40 chars, non-hex
-        assert!(!is_valid_info_hash("8F87C7C186172F17E35F4512BB1A3E93B614ADE")); // 39 hex chars
+        assert!(!is_valid_info_hash(
+            "not-a-hex-string-at-all-nope!!!!!!!!!!!!"
+        )); // 40 chars, non-hex
+        assert!(!is_valid_info_hash(
+            "8F87C7C186172F17E35F4512BB1A3E93B614ADE"
+        )); // 39 hex chars
     }
 }

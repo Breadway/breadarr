@@ -355,6 +355,26 @@ async fn background_loop(
         ) {
             error!(error = %e, "failed to register tpb source row");
         }
+        if let Err(e) = conn.execute(
+            "INSERT OR IGNORE INTO source (id, name, kind, base_url, poll_interval_secs, enabled)
+             VALUES (4, 'torrents-csv', 'scrape', ?1, ?2, 1)",
+            rusqlite::params![
+                config.sources.torrents_csv_url,
+                config.sources.search_poll_interval_secs
+            ],
+        ) {
+            error!(error = %e, "failed to register torrents-csv source row");
+        }
+        if let Err(e) = conn.execute(
+            "INSERT OR IGNORE INTO source (id, name, kind, base_url, poll_interval_secs, enabled)
+             VALUES (5, 'yts', 'scrape', ?1, ?2, 1)",
+            rusqlite::params![
+                config.sources.yts_api_url,
+                config.sources.search_poll_interval_secs
+            ],
+        ) {
+            error!(error = %e, "failed to register yts source row");
+        }
     }
 
     // A transient failure here (network blip during the one-time model
@@ -377,6 +397,21 @@ async fn background_loop(
     let scrape_source =
         sources::scrape::ScrapeSource::new(config.sources.torrent_1337x_mirrors.clone());
     let tpb_source = sources::tpb::TpbSource::new(config.sources.tpb_api_url.clone());
+    let torrents_csv_source =
+        sources::torrents_csv::TorrentsCsvSource::new(config.sources.torrents_csv_url.clone());
+    let yts_source = sources::yts::YtsSource::new(config.sources.yts_api_url.clone());
+    let search_sources = scheduler::SearchSources {
+        tpb: &tpb_source,
+        tpb_id: 3,
+        torrents_csv: &torrents_csv_source,
+        torrents_csv_id: 4,
+        yts: &yts_source,
+        yts_id: 5,
+        scrape: &scrape_source,
+        scrape_id: 2,
+        nyaa_search: &nyaa_source,
+        nyaa_id: 1,
+    };
 
     let mut grab_ticker = tokio::time::interval(std::time::Duration::from_secs(
         config.sources.grab_poll_interval_secs,
@@ -501,9 +536,7 @@ async fn background_loop(
                     let conn = conn.lock().await;
                     scheduler::run_search_cycle(
                         &conn,
-                        &tpb_source, 3,
-                        &scrape_source, 2,
-                        &nyaa_source, 1,
+                        &search_sources,
                         &mut title_matcher,
                         &qbit, &config.qbit.category,
                         config.sources.search_budget_per_cycle,
@@ -562,9 +595,7 @@ async fn background_loop(
                     let conn = conn.lock().await;
                     scheduler::run_upgrade_cycle(
                         &conn,
-                        &tpb_source, 3,
-                        &scrape_source, 2,
-                        &nyaa_source, 1,
+                        &search_sources,
                         &mut title_matcher,
                         &qbit, &config.qbit.category,
                         config.sources.upgrade_budget_per_cycle,
@@ -679,9 +710,7 @@ async fn background_loop(
                                 Ok(targets) => scheduler::execute_search_targets(
                                     &conn,
                                     &targets,
-                                    &tpb_source, 3,
-                                    &scrape_source, 2,
-                                    &nyaa_source, 1,
+                                    &search_sources,
                                     &mut title_matcher,
                                     &qbit, &config.qbit.category,
                                 ).await,
@@ -705,9 +734,7 @@ async fn background_loop(
                                 &conn,
                                 media_item_id,
                                 episode_id,
-                                &tpb_source, 3,
-                                &scrape_source, 2,
-                                &nyaa_source, 1,
+                                &search_sources,
                             ).await
                         };
                         let _ = reply.send(result);
@@ -1133,6 +1160,22 @@ async fn debug_search_show(config: &Config, title: &str) -> Result<()> {
             config.sources.search_poll_interval_secs
         ],
     )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO source (id, name, kind, base_url, poll_interval_secs, enabled)
+         VALUES (4, 'torrents-csv', 'scrape', ?1, ?2, 1)",
+        rusqlite::params![
+            config.sources.torrents_csv_url,
+            config.sources.search_poll_interval_secs
+        ],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO source (id, name, kind, base_url, poll_interval_secs, enabled)
+         VALUES (5, 'yts', 'scrape', ?1, ?2, 1)",
+        rusqlite::params![
+            config.sources.yts_api_url,
+            config.sources.search_poll_interval_secs
+        ],
+    )?;
 
     let qbit = QbitClient::new(config.qbit.base_url.clone())?;
     if !config.qbit.username.is_empty() {
@@ -1144,6 +1187,21 @@ async fn debug_search_show(config: &Config, title: &str) -> Result<()> {
     let scrape_source =
         sources::scrape::ScrapeSource::new(config.sources.torrent_1337x_mirrors.clone());
     let nyaa_source = sources::rss::RssSource::new(config.sources.nyaa_rss_url.clone());
+    let torrents_csv_source =
+        sources::torrents_csv::TorrentsCsvSource::new(config.sources.torrents_csv_url.clone());
+    let yts_source = sources::yts::YtsSource::new(config.sources.yts_api_url.clone());
+    let search_sources = scheduler::SearchSources {
+        tpb: &tpb_source,
+        tpb_id: 3,
+        torrents_csv: &torrents_csv_source,
+        torrents_csv_id: 4,
+        yts: &yts_source,
+        yts_id: 5,
+        scrape: &scrape_source,
+        scrape_id: 2,
+        nyaa_search: &nyaa_source,
+        nyaa_id: 1,
+    };
 
     let targets = scheduler::enumerate_search_targets_for_media_item(&conn, media_item_id)?;
     println!("{} missing episode(s)/movie for {title:?}", targets.len());
@@ -1151,12 +1209,7 @@ async fn debug_search_show(config: &Config, title: &str) -> Result<()> {
     let stats = scheduler::execute_search_targets(
         &conn,
         &targets,
-        &tpb_source,
-        3,
-        &scrape_source,
-        2,
-        &nyaa_source,
-        1,
+        &search_sources,
         &mut title_matcher,
         &qbit,
         &config.qbit.category,

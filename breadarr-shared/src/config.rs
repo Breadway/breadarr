@@ -97,6 +97,16 @@ pub struct SourcesConfig {
     /// titles made of common words.
     #[serde(default = "default_tpb_api_url")]
     pub tpb_api_url: String,
+    /// torrents.csv DHT-dump search — first fallback when TPB fails or
+    /// returns nothing. Same hash-to-magnet grab shape as TPB, covers
+    /// movies and TV.
+    #[serde(default = "default_torrents_csv_url")]
+    pub torrents_csv_url: String,
+    /// YTS v2 list_movies JSON — movie-only fallback after TPB / torrents-csv.
+    /// `yts.mx` does not resolve; this default is a working host as of
+    /// 2026-08-16.
+    #[serde(default = "default_yts_api_url")]
+    pub yts_api_url: String,
     /// Human kill switch for the upgrade-search loop, same reasoning as
     /// `search_enabled` — off by default would mean nothing ever improves,
     /// but a user who's happy with their current files (or wants to save
@@ -134,6 +144,8 @@ impl Default for SourcesConfig {
             search_budget_per_cycle: default_search_budget_per_cycle(),
             search_enabled: default_search_enabled(),
             tpb_api_url: default_tpb_api_url(),
+            torrents_csv_url: default_torrents_csv_url(),
+            yts_api_url: default_yts_api_url(),
             upgrade_enabled: default_upgrade_enabled(),
             upgrade_poll_interval_secs: default_upgrade_poll_interval_secs(),
             upgrade_budget_per_cycle: default_upgrade_budget_per_cycle(),
@@ -144,6 +156,14 @@ impl Default for SourcesConfig {
 
 fn default_tpb_api_url() -> String {
     "https://apibay.org/q.php".to_string()
+}
+
+fn default_torrents_csv_url() -> String {
+    "https://torrents-csv.com/service/search".to_string()
+}
+
+fn default_yts_api_url() -> String {
+    "https://yts.lt/api/v2/list_movies.json".to_string()
 }
 
 fn default_upgrade_enabled() -> bool {
@@ -192,6 +212,7 @@ fn default_import_poll_interval_secs() -> u64 {
 
 fn default_1337x_mirrors() -> Vec<String> {
     [
+        "https://www.1337xx.to",
         "https://13377x.info",
         "https://13377x.email",
         "https://1337xto.info",

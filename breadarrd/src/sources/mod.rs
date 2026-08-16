@@ -1,6 +1,8 @@
 pub mod rss;
 pub mod scrape;
+pub mod torrents_csv;
 pub mod tpb;
+pub mod yts;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -23,6 +25,39 @@ pub trait ReleaseSource {
     /// sources (e.g. a scraped search page); feed-based sources ignore it
     /// and return everything currently in the feed.
     async fn fetch(&self, query: Option<&str>) -> Result<Vec<RawReleaseItem>>;
+}
+
+/// Trackers attached to every magnet we synthesize from an info-hash
+/// (TPB, torrents-csv, YTS). Same set the TPB client has used since it
+/// landed — qBittorrent needs *some* announce list or the torrent sits
+/// hash-only until DHT finds peers.
+const MAGNET_TRACKERS: &[&str] = &[
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+    "udp://exodus.desync.com:6969/announce",
+];
+
+/// A valid BitTorrent v1 info_hash: 40 hex chars or 32 base32 chars — same
+/// shape `qbit::extract_btih` accepts out of a magnet URI. Shared by every
+/// hash-to-magnet source so a malformed value can't silently produce a
+/// magnet the grab path then fails to parse back.
+pub(crate) fn is_valid_info_hash(hash: &str) -> bool {
+    (hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        || (hash.len() == 32
+            && hash
+                .bytes()
+                .all(|b| matches!(b, b'2'..=b'7' | b'a'..=b'z' | b'A'..=b'Z')))
+}
+
+pub(crate) fn build_magnet(info_hash: &str, name: &str) -> String {
+    let mut magnet = format!("magnet:?xt=urn:btih:{info_hash}&dn={}", urlencode(name));
+    for t in MAGNET_TRACKERS {
+        magnet.push_str("&tr=");
+        magnet.push_str(&urlencode(t));
+    }
+    magnet
 }
 
 pub(crate) fn urlencode(s: &str) -> String {

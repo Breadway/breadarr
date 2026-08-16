@@ -72,6 +72,12 @@ import_poll_interval_secs = 60
 # Community JSON API mirror of The Pirate Bay — primary general-content
 # search source (movies + non-anime TV).
 tpb_api_url = "https://apibay.org/q.php"
+# torrents.csv DHT-dump search — first fallback when TPB fails or returns
+# nothing. Same hash-to-magnet grab; movies and TV.
+torrents_csv_url = "https://torrents-csv.com/service/search"
+# YTS v2 list_movies JSON — movie-only fallback. yts.mx does not resolve;
+# yts.lt is a working host as of 2026-08-16.
+yts_api_url = "https://yts.lt/api/v2/list_movies.json"
 # Search-driven acquisition (movies + non-anime TV via 1337x, anime movies
 # via nyaa's search mode) — unlike the nyaa RSS feed watch above, this
 # actively queries a Cloudflare-fronted service with a ban history, so keep
@@ -96,6 +102,7 @@ upgrade_min_score_gain = 5.0
 # tried in a fixed fallback order), with a failing mirror demoted into a
 # cooldown rather than re-probed on the very next search.
 torrent_1337x_mirrors = [
+  "https://www.1337xx.to",
   "https://13377x.info",
   "https://13377x.email",
   "https://1337xto.info",

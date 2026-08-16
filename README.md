@@ -26,10 +26,12 @@ Sonarr + Radarr + Prowlarr is three separate services, three databases, three we
 
 - **nyaa.si** (RSS) — anime TV, polled continuously. Full-auto, no request budget concerns (it's a plain RSS feed).
 - **apibay.org** (a community JSON API mirror of The Pirate Bay's search) — the primary search-driven source for general TV and movies. Unlike 1337x this is a genuine machine-readable API, needs no HTML scraping, and its search actually ranks by relevance rather than pure seeder count, which matters a lot for titles made of common words.
-- **1337x** (scraped HTML, via community mirrors) — secondary search-driven source, tried after TPB. 1337x's main domain is Cloudflare-protected and has a ban history, so requests are round-robined across mirrors with automatic cooldown/backoff on failures, jittered between searches, and rate-limit responses are honored explicitly.
-- **nyaa.si search mode** — anime movies specifically route here instead of TPB/1337x, since nyaa is the safe, official-RSS-interface target and gives materially better results for anime content.
+- **torrents-csv** (JSON DHT-dump search) — first general-content fallback when TPB fails or returns nothing. Same hash-to-magnet grab as TPB; covers movies and TV.
+- **YTS** (JSON `list_movies` API via `yts.lt` — `yts.mx` no longer resolves) — movie-only fallback after TPB. Each hit expands into one candidate per quality so the scorer sees 720p/1080p/2160p separately.
+- **1337x** (scraped HTML, via community mirrors) — last-resort general-content fallback after the JSON sources. 1337x's main domain is Cloudflare-protected and has a ban history, so requests are round-robined across mirrors with automatic cooldown/backoff on failures, jittered between searches, and rate-limit responses are honored explicitly.
+- **nyaa.si search mode** — anime movies specifically route here instead of the general-content chain, since nyaa is the safe, official-RSS-interface target and gives materially better results for anime content.
 
-All three search-driven sources share one per-cycle request budget (default: 5 searches per 30-minute cycle, TPB tried first, then 1337x, then nyaa search) — kept conservative since 1337x has a ban history and the goal is steady backlog clearing, not maximum throughput. A whole cycle failing outright backs off the *next cycle's* interval (1h → 2h → 4h, capped), on top of each source's own per-mirror cooldowns.
+Search-driven sources share one per-cycle request budget (default: 5 searches per 30-minute cycle). General content tries TPB, then YTS (movies) / torrents-csv, then 1337x; anime movies go to nyaa search. Kept conservative since 1337x has a ban history and the goal is steady backlog clearing, not maximum throughput. A whole cycle failing outright backs off the *next cycle's* interval (1h → 2h → 4h, capped), on top of each source's own per-mirror cooldowns.
 
 ## Setup
 
