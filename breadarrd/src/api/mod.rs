@@ -16,7 +16,7 @@ use crate::metadata::tvdb::TvdbClient;
 use crate::qbit::QbitClient;
 use crate::scheduler::SearchCycleStats;
 
-/// A `tokio::sync::Mutex`, not `std::sync::Mutex` — several handlers (e.g.
+/// A `tokio::sync::Mutex`, not `std::sync::Mutex`: several handlers (e.g.
 /// review-queue approval) interleave synchronous DB calls with `.await`ed
 /// qBittorrent/TVDB calls, and a sync `MutexGuard` can't be held across an
 /// await point. This one can.
@@ -30,7 +30,7 @@ pub struct AppState {
     pub cycle_status: Arc<std::sync::Mutex<CycleStatus>>,
     pub config: breadarr_shared::Config,
     /// `None` when the background loop isn't running (qbit not
-    /// configured) — routes that need the search pipeline (manual
+    /// configured): routes that need the search pipeline (manual
     /// "search now", the candidate picker) dispatch through this rather
     /// than running it inline, since that pipeline holds a `Connection`/
     /// `&dyn ReleaseSource` across `.await` points and is therefore
@@ -67,7 +67,7 @@ pub enum BackgroundRequest {
     },
 }
 
-/// One record per completed grab/import cycle attempt — plain `std::sync::
+/// One record per completed grab/import cycle attempt: plain `std::sync::
 /// Mutex` is fine here (unlike `conn`) since updates are a single field
 /// write with no `.await` in between. Exists so a silently-stalled
 /// background loop (e.g. every cycle erroring for hours) is visible from a
@@ -80,7 +80,7 @@ pub struct CycleStatus {
     pub last_upgrade: Option<CycleRecord>,
     pub last_transcode: Option<CycleRecord>,
     /// Set once the search-driven loop's consecutive-failure backoff hits
-    /// its ceiling — still ticking at max backoff underneath (self-healing
+    /// its ceiling; still ticking at max backoff underneath (self-healing
     /// if the source recovers), but worth a loud, easy-to-spot signal that
     /// something's wrong with 1337x/nyaa-search specifically.
     pub search_halted: bool,
@@ -94,13 +94,13 @@ pub struct CycleRecord {
 }
 
 /// Rejects any request lacking `Authorization: Bearer <config.daemon.api_token>`
-/// once a token is actually configured — a no-op (every request passes)
+/// once a token is actually configured: a no-op (every request passes)
 /// when it's empty, so an unconfigured install behaves exactly as before.
 /// Exact `/health` is deliberately exempt even with a token configured:
 /// it's commonly polled by external monitoring (e.g. an uptime dashboard)
 /// that has no reason to hold the same credential as the TUI/API client,
 /// and it exposes nothing more sensitive than "is the process alive."
-/// `/health/detail` is *not* exempt — it includes cycle status.
+/// `/health/detail` is *not* exempt: it includes cycle status.
 async fn require_api_token(State(state): State<AppState>, req: Request, next: Next) -> Response {
     if state.config.daemon.api_token.is_empty() || req.uri().path() == "/health" {
         return next.run(req).await;
@@ -119,7 +119,7 @@ async fn require_api_token(State(state): State<AppState>, req: Request, next: Ne
 
 /// Byte-wise `==` short-circuits on the first mismatching byte, making
 /// comparison time a (weak, but real) signal of how many leading bytes of a
-/// guessed token were correct — a classic timing oracle. This always walks
+/// guessed token were correct: a classic timing oracle. This always walks
 /// the longer input (padding the shorter against a dummy) and folds a
 /// length mismatch into the accumulator so a length difference is not a
 /// first-instruction return. Pair with `api_token.len() >= 16` in

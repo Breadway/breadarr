@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-/// How many recent backups `backup_before_open` keeps around — bounded so
+/// How many recent backups `backup_before_open` keeps around: bounded so
 /// a long-running daemon (restarted routinely by systemd on crash/update)
 /// doesn't slowly fill the disk with an ever-growing pile of copies.
 const MAX_BACKUPS: usize = 5;
@@ -8,7 +8,7 @@ const MAX_BACKUPS: usize = 5;
 /// Writes a consistent snapshot of the existing database to a timestamped
 /// file under `<db-dir>/backups/`, then prunes old backups beyond
 /// `MAX_BACKUPS`. A no-op if there's no existing database yet (fresh
-/// install — nothing to back up). Uses `VACUUM INTO` so WAL state is
+/// install; nothing to back up). Uses `VACUUM INTO` so WAL state is
 /// folded into one standalone file; a raw `fs::copy` of a live WAL
 /// database can be torn. Sonarr/Radarr back themselves up before every
 /// upgrade; breadarr has no migration framework to trigger that same
@@ -28,7 +28,7 @@ pub fn backup_before_open(db_path: &std::path::Path) -> anyhow::Result<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("breadarr.db");
     // Millisecond precision (not just seconds) so two backups triggered
-    // within the same second — restart-crash-loop territory — still sort
+    // within the same second (restart-crash-loop territory) still sort
     // and dedupe correctly instead of the second one silently overwriting.
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
     let dest = backup_dir.join(format!("{timestamp}-{stem}"));
@@ -70,7 +70,7 @@ fn prune_old_backups(backup_dir: &std::path::Path, stem: &str) -> anyhow::Result
 
 /// Ad-hoc migration for a column introduced after the initial schema. No
 /// migration framework exists (single production deployment, `CREATE TABLE
-/// IF NOT EXISTS` is the only mechanism otherwise) — idempotent by simply
+/// IF NOT EXISTS` is the only mechanism otherwise): idempotent by simply
 /// ignoring "duplicate column name", so it's safe to call on every startup
 /// against both a fresh database and one that already has the column.
 fn add_column_if_missing(
@@ -195,7 +195,7 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
          -- one AniDB entry can map to several TMDB movie ids (rereleases,
          -- split cuts), which doesn't fit `anime_mapping`'s one-row-per-
          -- anidb_id shape (that shape exists for TV's season/episode-offset
-         -- upsert semantics, meaningless for movies) — and nothing about a
+         -- upsert semantics, meaningless for movies), and nothing about a
          -- movie needs the anidb_id linkage anyway, only is-this-tmdb_id-
          -- an-anime-movie membership.
          CREATE TABLE IF NOT EXISTS anime_tmdb_movie (
@@ -223,7 +223,7 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
 
          -- One row per monitored episode/movie the search-driven loop has
          -- attempted at least once. `episode_id` NULL means the row is for
-         -- a movie (same nullable-episode_id convention as episode_file) —
+         -- a movie (same nullable-episode_id convention as episode_file):
          -- a plain UNIQUE(media_item_id, episode_id) can't express that,
          -- since SQLite treats NULLs as distinct, so two partial unique
          -- indexes stand in for it instead.
@@ -261,7 +261,7 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
              ON upgrade_state(media_item_id) WHERE episode_id IS NULL;
 
          -- A queryable decision log (grabbed/review_queued/imported/failed),
-         -- separate from `release`'s current-state columns — added after
+         -- separate from `release`'s current-state columns: added after
          -- a night of reconstructing why-did-it-do-that purely from
          -- journal logs. `media_item_id` has no FK so a row survives even
          -- after its media_item is deleted (the point is historical
@@ -285,7 +285,7 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
              VALUES (2, 'Default Movie', 'movie', '{}');
 
          -- One row per `episode_file`, ffprobe's ground-truth read of what's
-         -- actually on disk — a deliberate companion table rather than more
+         -- actually on disk: a deliberate companion table rather than more
          -- columns on `episode_file` (which already carries three vestigial,
          -- never-populated columns from an earlier attempt at this: don't
          -- compound that mistake). `probe_size_bytes`/`probe_mtime` are a
@@ -333,7 +333,7 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
          -- to qBittorrent, independent of whatever later happens to the
          -- `release` row it's associated with (which can be deleted, or
          -- flipped between grabbed/failed/imported/upgraded over time). No
-         -- foreign keys — same reasoning as `event_history`: the point is a
+         -- foreign keys; same reasoning as `event_history`: the point is a
          -- durable historical record, not live referential integrity, so a
          -- row must survive its source/media_item being deleted.
          CREATE TABLE IF NOT EXISTS torrent_fetch (
@@ -369,7 +369,7 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
              finished_at      TEXT
          );
          CREATE INDEX IF NOT EXISTS idx_transcode_job_status ON transcode_job(status);
-         -- Prevents two jobs for the same file ever being active at once —
+         -- Prevents two jobs for the same file ever being active at once:
          -- closes the door on the same file getting encoded twice
          -- concurrently regardless of how it happened (a stray duplicate
          -- enqueue, a daemon-restart reset racing a still-alive backfill).
@@ -385,10 +385,10 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
     )?;
 
     // Progress watermark for stalled-download detection (added after the
-    // initial `release` schema — see `add_column_if_missing`).
+    // initial `release` schema; see `add_column_if_missing`).
     add_column_if_missing(conn, "release", "last_seen_progress", "REAL")?;
     add_column_if_missing(conn, "release", "last_progress_at", "TEXT")?;
-    // Counts consecutive `import_one` failures for a completed torrent —
+    // Counts consecutive `import_one` failures for a completed torrent:
     // without this, a persistent import error (a bad path remap, an
     // unreadable file) retried forever every cycle with no escalation,
     // permanently blocking the episode/movie from being re-searched via a
@@ -401,7 +401,7 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     // Set only for season-pack grabs (`episode_id` stays NULL for these,
-    // same convention as movies — but unlike a movie, one media_item can
+    // same convention as movies; but unlike a movie, one media_item can
     // have many *different* season packs, so episode_id-is-NULL alone
     // can't disambiguate "season 1 pack" from "season 2 pack" the way it
     // disambiguates "this movie" from nothing else. This column is that
@@ -409,7 +409,7 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
     // in-flight checks to the right season.
     add_column_if_missing(conn, "release", "season_number", "INTEGER")?;
 
-    // Extra per-file metadata beyond the original probe columns — kept as
+    // Extra per-file metadata beyond the original probe columns: kept as
     // its own batch of `add_column_if_missing` calls (rather than folded
     // into the original `CREATE TABLE`) since that table already exists on
     // deployed databases. None of this feeds any decision yet; the point is
@@ -434,12 +434,12 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
     )?;
     add_column_if_missing(conn, "media_file_probe", "color_transfer", "TEXT")?;
     add_column_if_missing(conn, "media_file_probe", "container_format", "TEXT")?;
-    // The complete ffprobe JSON response, verbatim — the escape hatch for
+    // The complete ffprobe JSON response, verbatim: the escape hatch for
     // anything not already worth its own column (chapters, encoder tag,
     // less-common stream metadata). See `ffprobe::MediaProbe::raw_json`.
     add_column_if_missing(conn, "media_file_probe", "raw_ffprobe_json", "TEXT")?;
 
-    // Set once a file has been through a successful local AV1 transcode —
+    // Set once a file has been through a successful local AV1 transcode:
     // stops the upgrade cycle from treating it as still needing a bigger
     // HEVC/H264 release, since `best_existing_score` otherwise only ever
     // sees the stored `release.score` from original-grab time, which a
@@ -456,7 +456,7 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
     // `anime_tmdb_movie` metadata check) and carried on the job row so
     // `claim_pending_jobs` can dispatch straight to the right encode
     // pipeline (`run_ffmpeg_encode_anime` vs `_live_action`) without
-    // re-deriving it — the eligibility metadata lookups aren't available
+    // re-deriving it: the eligibility metadata lookups aren't available
     // from the job row's own columns alone (no media_item_id here).
     add_column_if_missing(
         conn,
@@ -465,12 +465,12 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
 
-    // Lets a job re-encode a file that's already AV1 — normally
+    // Lets a job re-encode a file that's already AV1: normally
     // `encode_and_verify` treats "already AV1" as nothing-to-do and skips
     // the encode entirely, which is right for a fresh library scan but
     // wrong for deliberately re-transcoding a file that got mis-encoded
     // (e.g. the 476 files a real rate-control bug left *larger* than their
-    // original — already AV1, so the normal backfill query skips them, but
+    // original: already AV1, so the normal backfill query skips them, but
     // they're exactly what a remediation pass needs to revisit). See
     // `find_oversized_av1_candidates`.
     add_column_if_missing(
@@ -513,7 +513,7 @@ fn create_unique_index_best_effort(conn: &Connection, name: &str, ddl: &str) -> 
 
 /// Delete extra `media_item` rows that share a non-NULL `tvdb_id`/`tmdb_id`,
 /// keeping the lowest `id`. Extras with any `episode` or `episode_file`
-/// rows are left in place — those are not safe to drop. Returns whether
+/// rows are left in place: those are not safe to drop. Returns whether
 /// every duplicate group was reduced to a single row.
 fn dedupe_media_item_external_id(conn: &Connection, column: &str) -> anyhow::Result<bool> {
     debug_assert!(column == "tvdb_id" || column == "tmdb_id");
@@ -633,7 +633,7 @@ fn ensure_indexes(conn: &Connection) -> anyhow::Result<()> {
 }
 
 /// Appends one row to `event_history`. `event_type` must be one of the
-/// values the table's `CHECK` constraint allows — a bad value surfaces
+/// values the table's `CHECK` constraint allows: a bad value surfaces
 /// immediately as a `rusqlite::Error`, not a silent no-op.
 pub fn record_event(
     conn: &Connection,
@@ -650,7 +650,7 @@ pub fn record_event(
     Ok(())
 }
 
-/// Appends one row to `torrent_fetch` — the permanent audit log, distinct
+/// Appends one row to `torrent_fetch`: the permanent audit log, distinct
 /// from `release` (whose status/hash can change or which can be deleted
 /// alongside its media_item). Called once per actual qBittorrent add,
 /// regardless of what happens to the grab afterward.

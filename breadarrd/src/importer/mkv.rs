@@ -10,7 +10,7 @@ pub struct AudioTrack {
     pub is_default: bool,
 }
 
-/// Runs `mkvmerge -J` (JSON track info) — mkvtoolnix's own structured-output
+/// Runs `mkvmerge -J` (JSON track info): mkvtoolnix's own structured-output
 /// mode, so track inspection doesn't depend on parsing human-readable text.
 pub fn inspect_audio_tracks(path: &Path) -> Result<Vec<AudioTrack>> {
     let output = Command::new("mkvmerge")
@@ -65,7 +65,7 @@ pub fn default_track_is_english_or_unset(tracks: &[AudioTrack]) -> bool {
 }
 
 /// Re-flags the English track as default (and all others as non-default)
-/// without re-encoding — fixes the common "Italian track 1, English track
+/// without re-encoding: fixes the common "Italian track 1, English track
 /// 2" pattern. Returns an error if there's no English track to promote.
 pub fn remux_english_default(input: &Path, output: &Path, tracks: &[AudioTrack]) -> Result<()> {
     let english_id = tracks

@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use crate::api::AppState;
 
 /// Every flag category shares the same shape (id/title/episode-label/path),
-/// resolved through the same TV-or-movie join every time — `episode_id` is
+/// resolved through the same TV-or-movie join every time: `episode_id` is
 /// set for a TV file (join via `episode`→`media_item`) and NULL for a movie
 /// file (join `media_item` directly via `episode_file.media_item_id`), the
 /// same nullable-episode_id convention used throughout this schema.
@@ -113,7 +113,7 @@ fn fetch_summary(conn: &Connection) -> rusqlite::Result<LibrarySummary> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     // Resolution buckets are computed against `height` directly rather than
-    // reusing `flag_under_quality` (which is only a <1080p boolean) — this
+    // reusing `flag_under_quality` (which is only a <1080p boolean); this
     // view wants the full breakdown, not just the pass/fail split.
     let bucket = |where_clause: &str| -> rusqlite::Result<i64> {
         conn.query_row(
@@ -189,7 +189,7 @@ mod tests {
     use super::*;
 
     /// A TV episode file (id=1, under-quality) and a movie file (id=2,
-    /// no English audio) with `media_file_probe` rows already populated —
+    /// no English audio) with `media_file_probe` rows already populated:
     /// exercises both halves of the nullable-episode_id join every query in
     /// this file relies on.
     fn seeded_conn() -> Connection {

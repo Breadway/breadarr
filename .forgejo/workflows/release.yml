@@ -54,7 +54,7 @@ jobs:
               echo "signed ${bin}-x86_64"
             done
           else
-            echo "::warning::BAKERY_MINISIGN_SEC_KEY_PATH not set — shipping breadarrd-x86_64/breadarr-tui-x86_64 UNSIGNED"
+            echo "::warning::BAKERY_MINISIGN_SEC_KEY_PATH not set: shipping breadarrd-x86_64/breadarr-tui-x86_64 UNSIGNED"
           fi
 
       - name: regenerate index.json
@@ -63,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${MINISIGN_SEC_KEY:-}" ]; then
-            echo "::error::BAKERY_MINISIGN_SEC_KEY_PATH secret not set — refusing to regenerate stable index.json unsigned (would leave a stale signature mismatched against fresh content and break bakery for everyone on the stable track)"
+            echo "::error::BAKERY_MINISIGN_SEC_KEY_PATH secret not set: refusing to regenerate stable index.json unsigned (would leave a stale signature mismatched against fresh content and break bakery for everyone on the stable track)"
             exit 1
           fi
           rm -rf /tmp/bread-ecosystem-ci-* 2>/dev/null || true
@@ -74,6 +74,6 @@ jobs:
           bash "${ECOSYSTEM_CI_DIR}/scripts/gen-index.sh"
           rm -rf "${ECOSYSTEM_CI_DIR}"
 
-      # No GitHub Release upload step — breadarr has no GitHub mirror,
+      # No GitHub Release upload step: breadarr has no GitHub mirror,
       # unlike most sibling bread-ecosystem repos. dl.breadway.dev is the
       # only distribution point for this repo.

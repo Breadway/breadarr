@@ -11,13 +11,13 @@ const BASE_COOLDOWN_SECS: u64 = 5 * 60;
 const MAX_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
 const RATE_LIMIT_MIN_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 const RATE_LIMIT_MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
-/// Hard cap on the tracked failure streak — well past the point where
+/// Hard cap on the tracked failure streak: well past the point where
 /// `BASE_COOLDOWN_SECS * 4^(streak-1)` already exceeds `MAX_COOLDOWN`, it
 /// exists purely so the exponent can never grow large enough to overflow.
 const MAX_FAILURE_STREAK: u32 = 10;
 
 /// 1337x's main domain (1337x.to) bans IPs at the Cloudflare WAF level
-/// after bursts of automated traffic — a network-level block that no
+/// after bursts of automated traffic: a network-level block that no
 /// amount of browser-fingerprint evasion gets around. Its community
 /// mirrors run on separate domains/Cloudflare zones, so a ban on one
 /// doesn't carry over. Requests are round-robined across mirrors (not just
@@ -52,11 +52,11 @@ impl MirrorRing {
 /// while a timeout or a challenge page gets the milder exponential ladder.
 #[derive(Debug)]
 enum MirrorError {
-    /// No results table found at all — most likely a Cloudflare challenge
+    /// No results table found at all: most likely a Cloudflare challenge
     /// page served with an HTTP 200 (so `error_for_status` wouldn't catch
     /// it), or the mirror's HTML layout has drifted.
     Challenge,
-    /// 403/429/503 — an explicit throttle/block signal from the WAF, not a
+    /// 403/429/503: an explicit throttle/block signal from the WAF, not a
     /// generic network failure.
     RateLimited {
         retry_after_secs: Option<u64>,
@@ -77,7 +77,7 @@ impl std::fmt::Display for MirrorError {
 }
 
 /// Returned by [`ScrapeSource::fetch`] when every mirror is either on
-/// cooldown or failed this attempt — a distinct type (rather than a plain
+/// cooldown or failed this attempt: a distinct type (rather than a plain
 /// string error) so callers can `downcast_ref` to trigger cycle-level
 /// backoff without string-matching an error message.
 #[derive(Debug)]
@@ -100,7 +100,7 @@ impl ScrapeSource {
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
                 .timeout(Duration::from_secs(30))
                 // Cloudflare's cf_clearance cookie is per-zone (per mirror
-                // domain) — holding it means a mirror that challenged once
+                // domain); holding it means a mirror that challenged once
                 // can pass on subsequent requests instead of re-challenging
                 // every single time.
                 .cookie_store(true)
@@ -137,7 +137,7 @@ impl ScrapeSource {
         let mut ring = self.ring.lock().expect("mirror ring poisoned");
         let cooldown = match err {
             MirrorError::RateLimited { retry_after_secs } => {
-                // A rate-limit response isn't generic flakiness — don't let
+                // A rate-limit response isn't generic flakiness: don't let
                 // it ratchet the exponential streak, just apply a firm
                 // minimum (or the server's own Retry-After, capped).
                 let retry_after = retry_after_secs
@@ -210,7 +210,7 @@ fn compute_candidate_order(
 }
 
 /// True if `link` is already directly usable by qBittorrent's add-by-URL
-/// endpoint (a magnet URI or a direct .torrent download link) — false for
+/// endpoint (a magnet URI or a direct .torrent download link): false for
 /// a detail-page URL that needs resolving first (what search results give
 /// us, since the results table doesn't carry the magnet directly).
 pub fn needs_resolution(link: &str) -> bool {
@@ -218,12 +218,12 @@ pub fn needs_resolution(link: &str) -> bool {
 }
 
 /// The search results table only links to a torrent's detail page, not its
-/// magnet URI directly — fetches that page and extracts the magnet link.
+/// magnet URI directly: fetches that page and extracts the magnet link.
 /// A free function (not tied to a `ScrapeSource`/mirror list) because the
 /// detail URL captured at search time already has the right mirror domain
 /// baked in, and this needs to be callable from the grab path generically
 /// (including review-queue approval, which only has a stored link, not a
-/// `ScrapeSource` instance) — called only for the one candidate actually
+/// `ScrapeSource` instance); called only for the one candidate actually
 /// being grabbed, not for every search result, to keep request volume low.
 pub async fn resolve_magnet(client: &reqwest::Client, detail_url: &str) -> Result<String> {
     let resp = client
@@ -268,7 +268,7 @@ impl ReleaseSource for ScrapeSource {
 
 /// Pulls the numeric torrent ID out of a 1337x listing/detail href of the
 /// shape `/torrent/<id>/<slug>/` (relative) or `https://<mirror>/torrent/
-/// <id>/<slug>/` (absolute) — the one part of the URL that's identical
+/// <id>/<slug>/` (absolute): the one part of the URL that's identical
 /// across every mirror, unlike the domain. `None` if the href doesn't
 /// contain `/torrent/` at all (an unexpected HTML shape), in which case
 /// the caller falls back to the full URL rather than losing the item.
@@ -280,10 +280,10 @@ fn extract_torrent_id(href: &str) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// `None` when the results table itself is missing from the document —
+/// `None` when the results table itself is missing from the document:
 /// most likely a Cloudflare challenge page served with a 200 status (so it
 /// never trips `error_for_status`), or the mirror's HTML layout drifted.
-/// `Some(vec![])` is a genuine, trustworthy "no results" — those two cases
+/// `Some(vec![])` is a genuine, trustworthy "no results"; those two cases
 /// must not be conflated, since the former should demote the mirror and
 /// the latter should not.
 fn parse_search_results(html: &str, mirror: &str) -> Option<Vec<RawReleaseItem>> {
@@ -323,7 +323,7 @@ fn parse_search_results(html: &str, mirror: &str) -> Option<Vec<RawReleaseItem>>
         // The dedup key must not depend on which mirror answered: the same
         // physical torrent's `href` path (`/torrent/<id>/<slug>/`) is
         // identical across every mirror, but `detail_url` bakes in
-        // whichever mirror happened to serve this particular search — with
+        // whichever mirror happened to serve this particular search, with
         // ~10 mirrors round-robined for ban resilience, using the full URL
         // as `guid` meant the same release looked "new" up to 10 times
         // over, defeating `is_seen`/`mark_seen` dedup entirely and flooding
@@ -349,7 +349,7 @@ fn parse_search_results(html: &str, mirror: &str) -> Option<Vec<RawReleaseItem>>
 
         items.push(RawReleaseItem {
             title,
-            // Not directly grabbable yet — a detail-page URL, resolved to
+            // Not directly grabbable yet: a detail-page URL, resolved to
             // a real magnet link via `resolve_magnet` right before the
             // winning candidate is actually sent to qBittorrent.
             link: detail_url,
@@ -437,7 +437,7 @@ mod tests {
         let b = parse_search_results(SAMPLE_ROW, "https://1337x.maskbay.info").unwrap();
         // The `link` legitimately differs (it's used to actually fetch from
         // whichever mirror answered this search) but the dedup `guid` must
-        // not, or mirror rotation defeats `is_seen`/`mark_seen` entirely —
+        // not, or mirror rotation defeats `is_seen`/`mark_seen` entirely,
         // this was a real bug that flooded the review queue with up to 13
         // duplicate entries for the same release.
         assert_ne!(a[0].link, b[0].link);

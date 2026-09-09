@@ -31,7 +31,7 @@ fn get_episode_title(conn: &Connection, episode_id: i64) -> Result<Option<String
 }
 
 /// Renames `file` to `target_name` within the same directory (never moves
-/// across directories/filesystems) — a plain filesystem rename, so it's
+/// across directories/filesystems); a plain filesystem rename, so it's
 /// fast and doesn't touch file content. Refuses to clobber an existing,
 /// differently-named file already at the target path.
 fn rename_in_place(file: &Path, target_name: &str) -> Result<std::path::PathBuf> {
@@ -55,14 +55,14 @@ fn rename_in_place(file: &Path, target_name: &str) -> Result<std::path::PathBuf>
 }
 
 // A "[Group]" or "[Tag]" prefix at the very start (common anime release-
-// group convention, e.g. "[SubsPlease] Show Name") — stripped before any
+// group convention, e.g. "[SubsPlease] Show Name"); stripped before any
 // other parsing so it doesn't pollute the metadata search query or survive
 // into the normalized title.
 static LEADING_BRACKET_TAG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\[[^\]]+\]\s*").unwrap());
 // "<Series> Movie 01 - <Subtitle>" is a common anime-movie flat-file naming
 // convention, but TMDB's search is not fuzzy enough to see past the "Movie
-// 01" token — it returns zero results for the full string even though
+// 01" token: it returns zero results for the full string even though
 // "<Series> <Subtitle>" alone matches immediately. Only fires when a dash
 // follows (an un-subtitled "Some Movie 2" is left alone).
 static MOVIE_NUMBER_RE: LazyLock<Regex> =
@@ -73,7 +73,7 @@ static FOLDER_BARE_YEAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b((?:19|20)\d{2})\b").unwrap());
 // Common release-tag vocabulary (quality/source/codec/audio/season markers)
 // that shows up in folder names that were never cleaned up after being
-// dropped straight out of a torrent client — everything from the first
+// dropped straight out of a torrent client: everything from the first
 // match onward is discarded, since normalization keeps only Name and Year.
 static FOLDER_JUNK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -90,7 +90,7 @@ fn clean_title_edge(s: &str) -> String {
 }
 
 /// Extracts just Name and Year out of a folder name, discarding everything
-/// else — release-tag cruft (resolution/source/codec/group/season markers)
+/// else: release-tag cruft (resolution/source/codec/group/season markers)
 /// that's meaningful on a torrent's own filename has no business surviving
 /// into the library's folder layout. "Arrival (2016)" -> ("Arrival",
 /// Some(2016)); "Arrival.2016.1080p.BluRay.x264-GROUP" -> ("Arrival",
@@ -102,7 +102,7 @@ fn parse_folder_name(name: &str) -> (String, Option<u32>) {
     let name = name.as_ref();
 
     // Scene-style names pack everything into dot/underscore-separated
-    // tokens with no real spaces at all — normalize those to spaces before
+    // tokens with no real spaces at all; normalize those to spaces before
     // hunting for a year/junk boundary. Left untouched whenever real spaces
     // are already present, so legitimately dotted titles ("Mr. Robot")
     // aren't mangled.
@@ -121,7 +121,7 @@ fn parse_folder_name(name: &str) -> (String, Option<u32>) {
         return (title, year);
     }
     // A bare year is only trusted as *the* year when something precedes it
-    // — otherwise a movie literally titled after a year ("1917", "2012")
+    // otherwise a movie literally titled after a year ("1917", "2012")
     // would have its own title mistaken for a year with nothing left over.
     if let Some(m) = FOLDER_BARE_YEAR_RE.find(&normalized) {
         if m.start() > 0 {
@@ -145,7 +145,7 @@ fn canonical_folder_name(title: &str, year: Option<u32>) -> String {
 
 /// Renames a media folder in place so its name is exactly the canonical
 /// "{Title} ({Year})" form, discarding whatever release-tag/resolution/
-/// group cruft the original folder name carried — normalization is meant to
+/// group cruft the original folder name carried; normalization is meant to
 /// leave nothing but name and year behind. Same-filesystem rename, doesn't
 /// touch file content; refuses to clobber an existing, different folder
 /// already at the target name; a no-op if already canonical.
@@ -181,7 +181,7 @@ fn subdirectories(root: &Path) -> Result<Vec<std::fs::DirEntry>> {
 }
 
 /// Below this cosine similarity, the "best" candidate among *multiple*
-/// options still isn't good enough to trust over the alternatives — treated
+/// options still isn't good enough to trust over the alternatives: treated
 /// as no match at all. Only applied when there's more than one candidate to
 /// choose between: a lone candidate is accepted unconditionally, since a
 /// low score there usually just means the provider has no English name or
@@ -190,16 +190,16 @@ fn subdirectories(root: &Path) -> Result<Vec<std::fs::DirEntry>> {
 const MIN_MATCH_CONFIDENCE: f32 = 0.5;
 
 /// TVDB/TMDB's own search relevance ranking isn't reliable enough to trust
-/// blindly — e.g. searching "Attack on Titan" ranks the spinoff "Attack on
+/// blindly: e.g. searching "Attack on Titan" ranks the spinoff "Attack on
 /// Titan: Counter Rockets" above the real 2013 series, whose own alias
 /// list has the far-closer "Attack on Titan (2013)". Exact year match (when
 /// the folder name has one) is tried first since it's a hard, cheap
-/// signal; the embedding matcher — comparing the query against every
-/// result's name *and* aliases, not just the top hit — breaks ties and
+/// signal; the embedding matcher (comparing the query against every
+/// result's name *and* aliases, not just the top hit) breaks ties and
 /// covers the (common) case where no year is available at all.
 ///
 /// When a year *is* known but no exact match exists, candidates whose year
-/// is off by more than one are excluded before the embedding pass — without
+/// is off by more than one are excluded before the embedding pass; without
 /// this, a title-only match (a misplaced TV season-pack folder colliding
 /// with an unrelated same-named movie already in the catalog) can look
 /// identical to a real hit purely on text similarity.
@@ -209,7 +209,7 @@ fn pick_series_match(
     results: Vec<SeriesSearchResult>,
     want_year: Option<u32>,
 ) -> Result<Option<SeriesSearchResult>> {
-    // No "exact year match wins outright" shortcut here on purpose — a
+    // No "exact year match wins outright" shortcut here on purpose: a
     // year match alone doesn't disambiguate title (e.g. two same-year,
     // differently-titled shows), and bypassing the embedding-similarity
     // check below on year alone is the same incident class as the
@@ -241,7 +241,7 @@ fn pick_series_match(
     // wrong-but-unopposed match this floor exists to catch. The single-
     // candidate bypass is only safe when the provider's search itself
     // returned one result (e.g. TVDB's only entry for a show has no English
-    // name/alias at all — still unambiguous), not when filtering produced one.
+    // name/alias at all, still unambiguous), not when filtering produced one.
     if results.len() > 1 && score < MIN_MATCH_CONFIDENCE {
         return Ok(None);
     }
@@ -280,7 +280,7 @@ fn pick_movie_match(
     results: Vec<MovieSearchResult>,
     want_year: Option<u32>,
 ) -> Result<Option<MovieSearchResult>> {
-    // See `pick_series_match` — no exact-year-wins-outright shortcut here
+    // See `pick_series_match`: no exact-year-wins-outright shortcut here
     // either, for the same reason.
     let pool = match want_year {
         Some(want) => year_filtered_pool(&results, want),
@@ -302,7 +302,7 @@ fn pick_movie_match(
     let Some((best_idx, score)) = matcher.best_match_index(query, &candidates)? else {
         return Ok(None);
     };
-    // See `pick_series_match` — gated on the pre-filter count, not `pool`.
+    // See `pick_series_match`: gated on the pre-filter count, not `pool`.
     if results.len() > 1 && score < MIN_MATCH_CONFIDENCE {
         return Ok(None);
     }
@@ -334,7 +334,7 @@ fn get_media_item_by_tmdb_id(conn: &Connection, tmdb_id: i64) -> Result<Option<i
 /// checking the two actually agree on *which show*. A provider ID can end
 /// up on the wrong row for reasons entirely outside this function's control
 /// (a bad selection when the show was originally added, a data-quality
-/// slip on the provider's own end) — verified live: this exact gap let
+/// slip on the provider's own end); verified live: this exact gap let
 /// "Boy Swallows Universe" (added with a TVDB ID that collided with Naruto
 /// Kai's real one) silently absorb Naruto Kai's folder path on a later
 /// scan, and Naruto Kai's own tracking row simply vanished, merged into an
@@ -364,7 +364,7 @@ fn existing_row_title_plausibly_matches(
             candidate_title,
             score,
             "provider-ID match found an existing row, but its title doesn't \
-             plausibly match the folder being scanned — refusing to repoint \
+             plausibly match the folder being scanned: refusing to repoint \
              its root_folder onto a possibly-unrelated show"
         );
     }
@@ -407,7 +407,7 @@ fn movie_has_file_row(conn: &Connection, media_item_id: i64) -> Result<bool> {
 /// Imports every show folder under `root` as a monitored series: matches
 /// it to TVDB, populates its full episode list, then walks its actual
 /// files and marks whichever episodes are already present as `has_file`
-/// (instead of a fresh "add show" which starts with nothing on disk) —
+/// (instead of a fresh "add show" which starts with nothing on disk):
 /// idempotent, safe to re-run against the same root later.
 pub async fn scan_tv_root(
     conn: &Connection,
@@ -445,7 +445,7 @@ pub async fn scan_tv_root(
             continue;
         };
         let canonical_year = best.year.or(year);
-        // Normalize the folder itself down to "Title (Year)" — release
+        // Normalize the folder itself down to "Title (Year)": release
         // tags/resolution/group cruft in the original folder name isn't
         // wanted in the library layout, only in the source torrent name.
         let series_dir = normalize_folder_name(root, &entry.path(), &title, canonical_year)?;
@@ -464,7 +464,7 @@ pub async fn scan_tv_root(
             id
         } else {
             let episodes = tvdb.episodes(&best.external_id).await?;
-            // Use the folder's own title, not TVDB's `name` field — for
+            // Use the folder's own title, not TVDB's `name` field: for
             // non-English-origin shows that's often the original-language
             // title (e.g. "進撃の巨人" for Attack on Titan), while the
             // folder name reflects how the user actually organizes their
@@ -494,12 +494,12 @@ pub async fn scan_tv_root(
             let filename = file.file_name().unwrap_or_default().to_string_lossy();
             let parsed = parser::parse(&filename);
             // `parsed.season` is `None` for the dominant fansub naming
-            // convention ("[SubsPlease] Show - 05.mkv" — absolute episode
+            // convention ("[SubsPlease] Show - 05.mkv": absolute episode
             // numbering only, no season marker at all), which previously
             // skipped linking these files entirely: `has_file` never got
             // set, so the daemon kept re-downloading episodes it already
             // had on disk. `crate::scheduler::resolve_episode` already
-            // handles exactly this via the anime absolute-numbering map —
+            // handles exactly this via the anime absolute-numbering map;
             // reused here instead of duplicating it.
             let Some((season, episode)) =
                 crate::scheduler::resolve_episode(conn, Some(tvdb_id), &parsed)?
@@ -536,7 +536,7 @@ pub async fn scan_tv_root(
 
             // Files imported before the season-folder convention existed
             // (or moved around by hand) can still be sitting flat in the
-            // show root — move them under `Season NN` now rather than just
+            // show root; move them under `Season NN` now rather than just
             // recording wherever they happen to already be. Same
             // filesystem as `series_dir`, so this is a plain rename.
             let season_folder = importer::season_dir(&series_dir.to_string_lossy(), season);
@@ -580,10 +580,10 @@ pub async fn scan_tv_root(
     }
 
     // Folder renames (via `normalize_folder_name`) change paths Jellyfin
-    // already has indexed under their old names — without an explicit
+    // already has indexed under their old names: without an explicit
     // refresh here, Jellyfin's own library index silently falls out of
     // sync with disk until its *own* next scheduled scan happens to run,
-    // which could be hours away. Verified live: exactly this happened —
+    // which could be hours away. Verified live: exactly this happened;
     // renamed anime folders vanished from Jellyfin's library view because
     // nothing told it to look again.
     if !report.matched.is_empty() {
@@ -596,10 +596,10 @@ pub async fn scan_tv_root(
 }
 
 /// Refreshes Jellyfin's library index after a scan that may have renamed
-/// folders — a single fire-and-forget attempt previously left Jellyfin's
+/// folders: a single fire-and-forget attempt previously left Jellyfin's
 /// index silently stale for however long it took its own next scheduled
 /// scan to notice on a transient failure (Jellyfin mid-restart, a momentary
-/// network blip — the realistic failure mode, not a persistent outage).
+/// network blip; the realistic failure mode, not a persistent outage).
 /// Retries a few times with backoff before giving up, and logs at `error`
 /// (not `warn`) once retries are exhausted, since a permanently stale
 /// Jellyfin index is exactly the kind of thing worth actually noticing
@@ -622,7 +622,7 @@ async fn refresh_jellyfin_after_rename(jellyfin: &crate::jellyfin::JellyfinClien
                 tracing::error!(
                     error = %e,
                     context,
-                    "jellyfin library refresh failed after {ATTEMPTS} attempts — its index may \
+                    "jellyfin library refresh failed after {ATTEMPTS} attempts: its index may \
                      stay stale relative to disk until its own next scheduled scan runs"
                 );
             }
@@ -632,7 +632,7 @@ async fn refresh_jellyfin_after_rename(jellyfin: &crate::jellyfin::JellyfinClien
 
 /// One thing to match+import: either a "one folder per movie" entry (the
 /// common layout) or a bare video file sitting directly under the root
-/// (some libraries — e.g. this one's "Anime Movies" — are organized flat,
+/// (some libraries, e.g. this one's "Anime Movies", are organized flat,
 /// one file per movie with no per-movie folder at all).
 struct MovieCandidate {
     display_name: String,
@@ -678,11 +678,11 @@ fn movie_candidates(root: &Path) -> Result<Vec<MovieCandidate>> {
     Ok(out)
 }
 
-/// Ensures a movie has its own folder before it's otherwise processed —
+/// Ensures a movie has its own folder before it's otherwise processed:
 /// restructures a bare file directly under `root` into "{Title}
 /// ({Year})/{file}", matching the "one folder per movie" convention the
-/// rest of the library already uses (some libraries — e.g. this one's
-/// "Anime Movies" — were organized flat, one file per movie with no
+/// rest of the library already uses (some libraries, e.g. this one's
+/// "Anime Movies", were organized flat, one file per movie with no
 /// per-movie folder at all). Same-filesystem rename, doesn't touch file
 /// content; a no-op if `video_source` is already a folder.
 fn ensure_movie_folder(
@@ -710,7 +710,7 @@ fn ensure_movie_folder(
 /// Same idea as [`scan_tv_root`] but for movies: one media_item per
 /// candidate (folder or bare file, restructured into its own folder if it
 /// wasn't already one), matched to TMDB, with its video file linked as its
-/// `episode_file` (movies have no `episode` row — `episode_id` is NULL).
+/// `episode_file` (movies have no `episode` row; `episode_id` is NULL).
 pub async fn scan_movie_root(
     conn: &Connection,
     tmdb: &TmdbClient,
@@ -748,7 +748,7 @@ pub async fn scan_movie_root(
         };
         let canonical_year = best.year.or(year);
 
-        // Normalizes the folder itself down to "Title (Year)" too — release
+        // Normalizes the folder itself down to "Title (Year)" too: release
         // tags/resolution/group cruft from the original folder/file name
         // isn't wanted in the library layout, only in the source torrent
         // name (covers both a pre-existing messily-named folder and a flat
@@ -823,7 +823,7 @@ pub async fn scan_movie_root(
         }
     }
 
-    // See the matching comment in `scan_tv_root` — folder renames need an
+    // See the matching comment in `scan_tv_root`: folder renames need an
     // explicit refresh or Jellyfin's index silently falls out of sync with
     // disk until its own next scheduled scan.
     if !report.matched.is_empty() {

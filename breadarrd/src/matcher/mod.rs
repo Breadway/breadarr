@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use embed::{cosine_similarity, OrtEmbedder};
 
 // Pinned to Xenova/all-MiniLM-L6-v2 @ 751bff37182d3f1213fa05d7196b954e230abad9
-// (current `main` as of this change) — not the floating `main` branch.
+// (current `main` as of this change), not the floating `main` branch.
 const MODEL_URL: &str =
     "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/onnx/model.onnx";
 const TOKENIZER_URL: &str =
@@ -20,11 +20,11 @@ const MODEL_SHA256: &str = "759c3cd2b7fe7e93933ad23c4c9181b7396442a2ed746ec7c1d4
 const TOKENIZER_SHA256: &str = "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0";
 
 /// Downloads the embedding model into `model_dir` if it isn't already
-/// there — keeps setup to "run the daemon," no separate fetch step, in
+/// there: keeps setup to "run the daemon," no separate fetch step, in
 /// keeping with the project's minimal-setup goal.
 ///
 /// `bread_onnx::download::ensure_file` is sync/blocking (`ureq`, matching
-/// this workspace's `bakery` download convention) — this used to be a
+/// this workspace's `bakery` download convention); this used to be a
 /// `reqwest`-based async implementation local to this crate, genuinely
 /// duplicating breadmill's own sync/`ureq` downloader. Since this fn is
 /// called from an async context, each call is dispatched via
@@ -60,19 +60,19 @@ const EMBEDDING_DIM: usize = 384;
 
 /// Below this cosine similarity, no match is proposed at all.
 pub(crate) const MIN_CONFIDENCE: f32 = 0.55;
-/// At or above this, auto-match without queuing for manual review — but see
+/// At or above this, auto-match without queuing for manual review; but see
 /// `token_overlap_ratio` below, which gates this further.
 const AUTO_MATCH_CONFIDENCE: f32 = 0.85;
 /// Auto-match additionally requires at least this much literal word overlap
 /// between the query and the matched title/alias. all-MiniLM-L6-v2 is
 /// trained on English semantic similarity; on romanized Japanese anime
-/// titles it doesn't actually discriminate between shows — it clusters
+/// titles it doesn't actually discriminate between shows: it clusters
 /// *any* two romaji titles close together (shared particles/phonetics read
 /// as "similar foreign text"), producing confidently wrong matches between
 /// completely unrelated series (verified live: multiple unrelated
 /// currently-airing anime auto-matched to "Demon Slayer" and "Mushoku
 /// Tensei" at >0.85 confidence with zero actual relation). Requiring some
-/// real word overlap catches exactly this failure mode — a genuine match
+/// real word overlap catches exactly this failure mode: a genuine match
 /// (including a registered alias) shares at least one real token; a
 /// same-cluster false positive usually shares none.
 const MIN_TOKEN_OVERLAP: f32 = 0.2;
@@ -104,14 +104,14 @@ impl TitleMatcher {
         })
     }
 
-    /// Caches by text — appropriate for candidate-side text only (library
+    /// Caches by text: appropriate for candidate-side text only (library
     /// `media_item` titles/aliases, or a metadata provider's small,
     /// bounded result list), which the same daemon process legitimately
     /// re-embeds across many calls. Deliberately never used for the query
     /// side (see `embed_query`): `TitleMatcher` lives for the whole life of
     /// `background_loop`, which never returns, and the query is a
     /// freshly-parsed release title from every RSS item and search result
-    /// the daemon ever sees — almost never repeated verbatim. Caching those
+    /// the daemon ever sees: almost never repeated verbatim. Caching those
     /// too grew this `HashMap` without bound for the process's entire
     /// (months-long) lifetime, a slow but real leak on a box also running
     /// several GB of concurrent GPU/CPU transcode work.
@@ -124,7 +124,7 @@ impl TitleMatcher {
         Ok(v)
     }
 
-    /// The query-side counterpart to `embed_cached` — same embedding, never
+    /// The query-side counterpart to `embed_cached`: same embedding, never
     /// stored in `self.cache`. See `embed_cached`'s doc comment for why.
     fn embed_query(&mut self, text: &str) -> Result<Vec<f32>> {
         self.embedder.embed(text)
@@ -134,7 +134,7 @@ impl TitleMatcher {
     /// name plus its aliases, flattened with an index back to which result
     /// each one belongs to), returns the index of whichever candidate text
     /// best matches `query` and its similarity score. Generic version of
-    /// the logic `match_title` uses against the DB — also used to
+    /// the logic `match_title` uses against the DB; also used to
     /// disambiguate metadata-provider search results, where the top result
     /// isn't always the right entry (TVDB's own relevance ranking can
     /// place a spinoff/short above the main series, e.g. searching "Attack
@@ -195,7 +195,7 @@ impl TitleMatcher {
             // The embedding-clustering failure mode this guards against
             // (see this struct's field docs / `MIN_TOKEN_OVERLAP`) lands
             // its false positives anywhere in [MIN_CONFIDENCE,
-            // AUTO_MATCH_CONFIDENCE) just as often as above it — a
+            // AUTO_MATCH_CONFIDENCE) just as often as above it: a
             // completely unrelated romaji title scores confidently
             // *enough* to pass MIN_CONFIDENCE, just not confidently enough
             // to auto-match. Gating only the auto-match branch left every
@@ -214,7 +214,7 @@ impl TitleMatcher {
 }
 
 /// Grammatical filler words that show up across countless unrelated titles
-/// and carry no discriminating signal on their own — English articles and
+/// and carry no discriminating signal on their own: English articles and
 /// the short romaji particles ubiquitous in Japanese titles ("X no Y", "X ga
 /// Y", ...). Without this, two completely unrelated shows sharing nothing
 /// but e.g. "no" register as real overlap and slip past `MIN_TOKEN_OVERLAP`
@@ -225,7 +225,7 @@ const STOPWORDS: &[&str] = &[
 ];
 
 /// Word-level overlap between `a` and `b`, as a fraction of the *shorter*
-/// title's word count — so a short alias fully contained in a longer title
+/// title's word count, so a short alias fully contained in a longer title
 /// (or vice versa) still scores 1.0, rather than being penalized by length
 /// mismatch. Case-insensitive, splits on non-alphanumeric runs, and ignores
 /// `STOPWORDS` so shared filler words don't count as real overlap.
@@ -250,7 +250,7 @@ fn token_overlap_ratio(a: &str, b: &str) -> f32 {
 /// `link`/`source_id` are stored (not just the title) so an approval can
 /// later actually complete the grab, rather than just recording a decision.
 /// Both `None` when there's no real source item behind the query (e.g. an
-/// ad hoc matcher test) — such an entry can be reviewed but not approved.
+/// ad hoc matcher test): such an entry can be reviewed but not approved.
 pub fn queue_for_review(
     conn: &Connection,
     raw_release_title: &str,
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn short_alias_contained_in_longer_title_fully_overlaps() {
         // The alias is fully covered by the longer title's words, so this
-        // should score 1.0 despite the length difference — an alias like
+        // should score 1.0 despite the length difference: an alias like
         // "Mushoku Tensei" shouldn't be penalized against the full title
         // "Mushoku Tensei: Jobless Reincarnation".
         let ratio = token_overlap_ratio("Mushoku Tensei", "Mushoku Tensei Jobless Reincarnation");

@@ -5,7 +5,7 @@ use breadarr_shared::dto::CalendarEntry;
 
 use crate::api::AppState;
 
-/// How far back/forward "upcoming" spans — matches the common Sonarr
+/// How far back/forward "upcoming" spans: matches the common Sonarr
 /// calendar default window (a week either side) rather than an arbitrary
 /// wider range, since the point is "what's relevant right now."
 const DAYS_PAST: i64 = 7;

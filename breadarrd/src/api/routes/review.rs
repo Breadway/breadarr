@@ -80,7 +80,7 @@ pub async fn approve(
             Ok(hash) => hash,
             Err(e) => {
                 // The grab errored outright (not just "added but no hash
-                // captured" — `finalize_review_approval` below handles that
+                // captured"; `finalize_review_approval` below handles that
                 // case and still runs to completion). `prepare_review_approval`
                 // already claimed this row into `approved` before we got here;
                 // without releasing it back to `pending`, a transient

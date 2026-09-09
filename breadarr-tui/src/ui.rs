@@ -7,7 +7,7 @@ use ratatui::Frame;
 use crate::app::{App, Focus, StuckSection, Tab};
 use breadarr_shared::dto::CycleInfo;
 
-// Shared color palette — kept to these meanings so a color never has to be
+// Shared color palette: kept to these meanings so a color never has to be
 // second-guessed at a glance:
 //   Green      healthy / 0 missing / high confidence / not stuck
 //   Yellow     warning / low missing / mid confidence / at backoff ceiling
@@ -15,7 +15,7 @@ use breadarr_shared::dto::CycleInfo;
 //   DarkGray   unmonitored / muted / not currently relevant
 //   Blue       TV kind tag (categorical, not severity)
 //   Magenta    Movie kind tag (categorical, not severity)
-//   Cyan       focus/interactive accent (tab highlight, active input, focused section) — never severity
+//   Cyan       focus/interactive accent (tab highlight, active input, focused section); never severity
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -48,7 +48,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 /// Keybindings relevant to the current tab/focus/detail state, in the order
-/// they should be shown — the single source of truth shared by the status
+/// they should be shown: the single source of truth shared by the status
 /// bar (which shows a short prefix) and the help overlay (which shows all of
 /// it plus `GLOBAL_KEYS`), so the two can't drift apart.
 fn context_keybindings(app: &App) -> Vec<(&'static str, &'static str)> {
@@ -103,7 +103,7 @@ const GLOBAL_KEYS: &[(&str, &str)] = &[
     ("q", "quit"),
 ];
 
-/// Centers a `width` x `height` rect inside `area` — standard ratatui idiom
+/// Centers a `width` x `height` rect inside `area`: standard ratatui idiom
 /// for a popup/overlay.
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let width = width.min(area.width);
@@ -143,7 +143,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let paragraph = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Help — ? or Esc to close"),
+            .title("Help: ? or Esc to close"),
     );
     frame.render_widget(paragraph, popup);
 }
@@ -193,7 +193,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
 
     let (daemon_label, daemon_color) = match (&app.daemon_up, &app.health) {
         (true, Some(h)) if h.search_halted => {
-            ("daemon: UP — ⚠ search halted".to_string(), Color::Yellow)
+            ("daemon: UP; ⚠ search halted".to_string(), Color::Yellow)
         }
         (true, Some(h)) => {
             let any_failed = [
@@ -207,7 +207,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
             .any(|c| !c.ok);
             if any_failed {
                 (
-                    "daemon: UP — last cycle had errors".to_string(),
+                    "daemon: UP; last cycle had errors".to_string(),
                     Color::Yellow,
                 )
             } else {
@@ -271,9 +271,9 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
             "unmonitored"
         };
         let confirm = if app.confirm_delete {
-            " — x AGAIN TO DELETE SHOW"
+            ": x AGAIN TO DELETE SHOW"
         } else if app.confirm_delete_file {
-            " — d AGAIN TO DELETE FILE"
+            ": d AGAIN TO DELETE FILE"
         } else {
             ""
         };
@@ -307,7 +307,7 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 0.0
             };
-            // Mute severity color for unmonitored items — a missing count
+            // Mute severity color for unmonitored items: a missing count
             // on something deliberately unmonitored isn't actionable.
             let missing_color = if !m.monitored || m.missing_count == 0 {
                 Color::DarkGray
@@ -317,7 +317,7 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
                 Color::Red
             };
             let missing_text = if m.missing_count > 0 {
-                format!(" — {} missing", m.missing_count)
+                format!(" ({} missing)", m.missing_count)
             } else {
                 String::new()
             };
@@ -352,7 +352,7 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
     };
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "Library ({}/{}) — filter: {}  sort: {}{search}{filter_caret}",
+            "Library ({}/{}); filter: {}  sort: {}{search}{filter_caret}",
             app.library_view.len(),
             app.media_items.len(),
             app.library_filter.label(),
@@ -370,9 +370,9 @@ fn draw_movie_detail(
     detail: &breadarr_shared::dto::MediaItemDetail,
 ) {
     let confirm = if app.confirm_delete {
-        " — x AGAIN TO DELETE"
+        ": x AGAIN TO DELETE"
     } else if app.confirm_delete_file {
-        " — d AGAIN TO DELETE FILE"
+        ": d AGAIN TO DELETE FILE"
     } else {
         ""
     };
@@ -418,7 +418,7 @@ fn draw_movie_detail(
     frame.render_widget(paragraph, area);
 }
 
-/// Manual release picker — candidates for whatever episode/movie was
+/// Manual release picker: candidates for whatever episode/movie was
 /// selected when `c` was pressed, scored (or gate-rejected with a reason)
 /// exactly like the automatic search pipeline would see them.
 fn draw_candidates(frame: &mut Frame, area: Rect, app: &App, media_title: &str) {
@@ -426,7 +426,7 @@ fn draw_candidates(frame: &mut Frame, area: Rect, app: &App, media_title: &str) 
         let placeholder = Paragraph::new("loading candidates...").block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!("{media_title} — candidates — Esc: cancel")),
+                .title(format!("{media_title}: candidates (Esc: cancel)")),
         );
         frame.render_widget(placeholder, area);
         return;
@@ -457,7 +457,7 @@ fn draw_candidates(frame: &mut Frame, area: Rect, app: &App, media_title: &str) 
             };
             ListItem::new(Line::from(vec![
                 Span::raw(format!(
-                    "[{}] {} — {seeders} seeders, {size}{flags} — ",
+                    "[{}] {}: {seeders} seeders, {size}{flags}; ",
                     c.source_name, c.raw_title
                 )),
                 Span::styled(verdict, Style::default().fg(color)),
@@ -466,7 +466,7 @@ fn draw_candidates(frame: &mut Frame, area: Rect, app: &App, media_title: &str) 
         .collect();
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "{media_title} — candidates — Enter: grab  Esc: cancel"
+            "{media_title}: candidates (Enter: grab  Esc: cancel)"
         )))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = app.candidates_state.clone();
@@ -493,7 +493,7 @@ fn draw_history(frame: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(history_status_color(&r.status)),
                 ),
                 Span::raw(format!(
-                    " {} — {} (score {:.1})",
+                    " {}: {} (score {:.1})",
                     r.media_title,
                     r.raw_title,
                     r.score.unwrap_or(0.0)
@@ -537,14 +537,14 @@ fn draw_review(frame: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Review Queue — a: approve, r: reject"),
+                .title("Review Queue (a: approve, r: reject)"),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = app.review_state.clone();
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// "Why don't I have this yet" — grabs sitting without importing longer
+/// "Why don't I have this yet": grabs sitting without importing longer
 /// than expected, how deep the review queue has backed up, and search
 /// targets that have been failing every attempt long enough for their
 /// backoff to hit its ceiling. Read-only report, no selection/navigation.
@@ -558,7 +558,7 @@ fn draw_stuck(frame: &mut Frame, area: Rect, app: &App) {
         let placeholder = Paragraph::new("loading...").block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Stuck — why don't I have this yet"),
+                .title("Stuck: why don't I have this yet"),
         );
         frame.render_widget(placeholder, area);
         return;
@@ -580,7 +580,7 @@ fn draw_stuck(frame: &mut Frame, area: Rect, app: &App) {
         .map(|g| {
             ListItem::new(Line::from(Span::styled(
                 format!(
-                    "{} — {} (grabbed {})",
+                    "{}: {} (grabbed {})",
                     g.media_title, g.raw_title, g.grabbed_at
                 ),
                 Style::default().fg(Color::Yellow),
@@ -593,7 +593,7 @@ fn draw_stuck(frame: &mut Frame, area: Rect, app: &App) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(stalled_border))
                 .title(format!(
-                    "Stalled grabs ({}) — review queue: {} pending",
+                    "Stalled grabs ({}); review queue: {} pending",
                     report.stalled_grabs.len(),
                     report.review_queue_depth
                 )),
@@ -618,7 +618,7 @@ fn draw_stuck(frame: &mut Frame, area: Rect, app: &App) {
             };
             ListItem::new(Line::from(Span::styled(
                 format!(
-                    "{} — {} attempts, last searched {}",
+                    "{}: {} attempts, last searched {}",
                     t.media_title,
                     t.search_count,
                     t.last_searched_at.as_deref().unwrap_or("never")
@@ -632,7 +632,7 @@ fn draw_stuck(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(maxed_border))
-                .title("Search targets at max backoff — Enter: jump to show"),
+                .title("Search targets at max backoff (Enter: jump to show)"),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut maxed_state = app.maxed_state.clone();
@@ -654,7 +654,7 @@ fn draw_add(frame: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Search — Enter to search movies and TV together"),
+                .title("Search: Enter to search movies and TV together"),
         );
     frame.render_widget(input, chunks[0]);
 
@@ -683,15 +683,15 @@ fn draw_add(frame: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Results — Enter to add"),
+                .title("Results: Enter to add"),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = app.add_results_state.clone();
     frame.render_stateful_widget(list, chunks[1], &mut state);
 }
 
-/// What's aired recently or airs soon (a week back, three weeks forward —
-/// see `calendar::DAYS_PAST`/`DAYS_FUTURE` server-side). Selectable —
+/// What's aired recently or airs soon (a week back, three weeks forward;
+/// see `calendar::DAYS_PAST`/`DAYS_FUTURE` server-side). Selectable:
 /// Enter jumps to that episode in Library.
 fn draw_calendar(frame: &mut Frame, area: Rect, app: &App) {
     let today = chrono::Local::now().date_naive().to_string();
@@ -723,7 +723,7 @@ fn draw_calendar(frame: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Calendar — Enter: jump  ✓ have it  … upcoming  ! aired but missing"),
+                .title("Calendar (Enter: jump  ✓ have it  … upcoming  ! aired but missing)"),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = app.calendar_state.clone();
@@ -732,7 +732,7 @@ fn draw_calendar(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Read-only report on `media_file_probe` state: corruption, under-quality,
 /// missing-subtitle/English-audio, non-English-default-audio, and duplicate
-/// files, plus a library-wide summary — no selection/navigation, same shape
+/// files, plus a library-wide summary: no selection/navigation, same shape
 /// as `draw_stuck`.
 fn draw_library_health(frame: &mut Frame, area: Rect, app: &App) {
     let Some(report) = &app.library_health else {
@@ -763,8 +763,8 @@ fn draw_library_health(frame: &mut Frame, area: Rect, app: &App) {
         .map(cycle_summary_line)
         .unwrap_or_default();
     let summary_text = format!(
-        "{cycles}\n{} files, {:.1} GB total, {} probed — resolution: SD={} 720p={} 1080p={} 4K={} \
-         — subtitles: {:.0}% — codecs: {codec_summary}",
+        "{cycles}\n{} files, {:.1} GB total, {} probed; resolution: SD={} 720p={} 1080p={} 4K={} \
+         ; subtitles: {:.0}%; codecs: {codec_summary}",
         s.total_files,
         s.total_size_bytes as f64 / 1_073_741_824.0,
         s.probed_files,
@@ -797,7 +797,7 @@ fn draw_library_health(frame: &mut Frame, area: Rect, app: &App) {
         for f in files {
             let label = f.episode_label.as_deref().unwrap_or("");
             items.push(ListItem::new(format!(
-                "  {} {label} — {}",
+                "  {} {label}: {}",
                 f.media_title, f.path
             )));
         }
@@ -821,7 +821,7 @@ fn draw_library_health(frame: &mut Frame, area: Rect, app: &App) {
         for g in &report.duplicate_groups {
             let label = g.episode_label.as_deref().unwrap_or("");
             items.push(ListItem::new(format!(
-                "  {} {label} — {} copies",
+                "  {} {label}: {} copies",
                 g.media_title,
                 g.paths.len()
             )));
@@ -829,7 +829,7 @@ fn draw_library_health(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     if items.is_empty() {
-        items.push(ListItem::new("Nothing flagged — library looks clean."));
+        items.push(ListItem::new("Nothing flagged: library looks clean."));
     }
 
     let list = List::new(items)
@@ -866,7 +866,7 @@ fn cycle_summary_line(h: &breadarr_shared::dto::HealthDetail) -> String {
     )
 }
 
-/// Quality-profile weight editing — list of profiles, then (once one is
+/// Quality-profile weight editing: list of profiles, then (once one is
 /// opened) a flat list of its 9 scoring axes with an inline text-input
 /// overlay while `Focus::WeightInput` is active.
 fn draw_profiles(frame: &mut Frame, area: Rect, app: &App) {
@@ -880,7 +880,7 @@ fn draw_profiles(frame: &mut Frame, area: Rect, app: &App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Quality Profiles — Enter: edit weights"),
+                    .title("Quality Profiles (Enter: edit weights)"),
             )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
         let mut state = app.profiles_state.clone();
@@ -906,7 +906,7 @@ fn draw_profiles(frame: &mut Frame, area: Rect, app: &App) {
     let input = Paragraph::new(app.weight_input_buffer.as_str())
         .style(input_style)
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "Editing {editing_label} — Enter: save  Esc: cancel"
+            "Editing {editing_label} (Enter: save  Esc: cancel)"
         )));
     frame.render_widget(input, chunks[0]);
 
@@ -916,7 +916,7 @@ fn draw_profiles(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "{} — Enter: edit selected  Esc: back",
+            "{} (Enter: edit selected  Esc: back)",
             profile.name
         )))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));

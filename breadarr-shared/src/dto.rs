@@ -70,7 +70,7 @@ pub struct MaxedSearchTarget {
     pub last_searched_at: Option<String>,
 }
 
-/// The daily "why don't I have this yet" answer — grabs that have been
+/// The daily "why don't I have this yet" answer: grabs that have been
 /// sitting without importing longer than expected, how deep the review
 /// queue has backed up, and search targets that have been failing every
 /// attempt for so long their backoff has hit its ceiling.
@@ -160,7 +160,7 @@ pub struct CycleInfo {
     pub detail: String,
 }
 
-/// One file flagged by a `media_file_probe` category — reused across every
+/// One file flagged by a `media_file_probe` category: reused across every
 /// flag list in `LibraryHealthReport` so a client can render them all with
 /// the same widget.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,7 +197,7 @@ pub struct LibrarySummary {
     pub pct_with_subtitles: f64,
 }
 
-/// One search result scored (or gate-rejected) for manual review — the
+/// One search result scored (or gate-rejected) for manual review: the
 /// same candidate a search cycle would evaluate automatically, surfaced
 /// before a grab decision is made instead of after. `link`/`guid`/
 /// `source_id` are carried through so a chosen candidate can be grabbed
@@ -212,7 +212,7 @@ pub struct ReleaseCandidate {
     pub seeders: Option<u32>,
     pub leechers: Option<u32>,
     pub size_bytes: Option<u64>,
-    /// `None` when gate-rejected — `rejected_reason` explains why.
+    /// `None` when gate-rejected; `rejected_reason` explains why.
     pub score: Option<f32>,
     pub rejected_reason: Option<String>,
     pub resolution: Option<u32>,
@@ -229,7 +229,7 @@ pub struct GrabCandidateRequest {
 }
 
 /// Every scoring axis `QualityProfile::Weights` has, mirrored 1:1 for the
-/// wire — used both to show the currently-effective (defaults-plus-stored-
+/// wire: used both to show the currently-effective (defaults-plus-stored-
 /// override) values and to submit a full replacement set when the user
 /// edits one.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -251,7 +251,7 @@ pub struct QualityProfileSummary {
     pub name: String,
     pub kind: String,
     /// Always the fully-resolved values (built-in defaults with any stored
-    /// override already applied) — never a partial/sparse object, so the
+    /// override already applied): never a partial/sparse object, so the
     /// TUI always has something concrete to display and re-submit.
     pub weights: WeightsDto,
 }

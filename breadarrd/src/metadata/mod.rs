@@ -38,7 +38,7 @@ pub struct EpisodeInfo {
 /// Split into a fetch step and a write step (see [`insert_series`]) rather
 /// than one function that both awaits and holds `conn`, because a caller
 /// using `Mutex<Connection>` (e.g. an axum handler) can't hold a sync
-/// `MutexGuard` across an `.await` point — this convenience wrapper is only
+/// `MutexGuard` across an `.await` point: this convenience wrapper is only
 /// safe for callers with an owned, unshared `Connection` (e.g. the debug
 /// CLI commands).
 #[allow(clippy::too_many_arguments)]
@@ -66,7 +66,7 @@ pub async fn add_series(
 }
 
 /// TVDB/TMDB ids are positive integers. `"0"` and non-numeric strings
-/// must not be stored — `0` would collide under the unique external-id
+/// must not be stored: `0` would collide under the unique external-id
 /// indexes the same way a parse-failure `unwrap_or_default()` used to.
 pub(crate) fn parse_external_id(raw: &str) -> Option<i64> {
     raw.parse().ok().filter(|&id| id > 0)
@@ -115,7 +115,7 @@ pub fn insert_series(
 
     let mut seasons_seen = HashSet::new();
     for ep in episodes {
-        // TVDB's "season 0" is a catch-all for specials — recaps, shorts,
+        // TVDB's "season 0" is a catch-all for specials: recaps, shorts,
         // and often a tie-in movie that's frequently already tracked as
         // its own separate `media_item` (verified live: Chainsaw Man's
         // season 0 included "Chainsaw Man – The Movie: Reze Arc", which
@@ -152,7 +152,7 @@ pub fn insert_series(
 }
 
 /// Inserts a movie into the library. No fetch step needed (unlike
-/// `add_series`/`insert_series`) — TMDB's movie search result already
+/// `add_series`/`insert_series`): TMDB's movie search result already
 /// carries everything a movie needs (title, year); there's no separate
 /// episode-list call the way a series has.
 pub fn insert_movie(

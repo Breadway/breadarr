@@ -13,7 +13,7 @@ use crate::jellyfin::JellyfinClient;
 /// Computes the target AV1 bitrate for a given resolution, scaled from the
 /// configured reference (a real HEVC/H264 bitrate at `reference_height` the
 /// user is already happy with) by pixel-count ratio, then discounted by
-/// `av1_efficiency_factor` — AV1 reaches equivalent perceived quality to
+/// `av1_efficiency_factor`: AV1 reaches equivalent perceived quality to
 /// HEVC/H264 at a meaningfully lower bitrate, so a like-for-like copy of the
 /// reference bitrate would leave savings on the table.
 pub fn target_bitrate_kbps(width: i64, height: i64, cfg: &TranscodeConfig) -> u32 {
@@ -26,13 +26,13 @@ pub fn target_bitrate_kbps(width: i64, height: i64, cfg: &TranscodeConfig) -> u3
 
 /// Runs the live-action GPU encode via `av1_vaapi`, decoding through VAAPI
 /// too (`-hwaccel_output_format vaapi`) so the whole pipeline stays on-GPU
-/// rather than round-tripping frames through the CPU. Video-only re-encode
-/// — every audio/subtitle/data stream is copied verbatim (`-c:a copy -c:s
+/// rather than round-tripping frames through the CPU. Video-only re-encode:
+/// every audio/subtitle/data stream is copied verbatim (`-c:a copy -c:s
 /// copy -c:d copy`).
 ///
 /// Rate control is `QVBR` (quality-defined VBR): `-global_quality` is the
 /// actual quality target driving output size, `-b:v`/`-maxrate`/`-bufsize`
-/// (computed from `target_bitrate_kbps`) are a *ceiling*, not a target —
+/// (computed from `target_bitrate_kbps`) are a *ceiling*, not a target:
 /// content that's already efficient spends less than the ceiling rather
 /// than being inflated up toward it. This replaced a flat `VBR + -b:v`
 /// scheme after a real incident: that scheme treated `-b:v` as the target
@@ -40,24 +40,24 @@ pub fn target_bitrate_kbps(width: i64, height: i64, cfg: &TranscodeConfig) -> u3
 /// the model's own reference bitrate) got re-encoded *larger* than the
 /// original on the majority of a real backfill. `encode_and_verify`'s
 /// post-encode size check is the actual hard guarantee against that
-/// happening again regardless of how this rate-control tuning holds up —
+/// happening again regardless of how this rate-control tuning holds up;
 /// this function only has to get it roughly right, not perfectly.
 ///
 /// Blocking and slow by design (a real GPU encode, potentially minutes per
-/// file) — callers must run this inside `tokio::task::spawn_blocking`, never
+/// file): callers must run this inside `tokio::task::spawn_blocking`, never
 /// directly on an async task, and never while holding the shared DB mutex.
 ///
 /// The output container is always Matroska, so this maps streams by type
-/// rather than the blanket `-map 0` the first version used — two real
+/// rather than the blanket `-map 0` the first version used: two real
 /// gaps that caused, both fixed:
 /// - `-map 0` pulled in attached-picture streams (embedded cover art,
 ///   exposed by ffmpeg as a second `video`-type stream, `mjpeg`/`png`) and
 ///   `-c:v av1_vaapi` then tried to encode *that* too, which the VAAPI
-///   filter chain can't handle — failed the whole job on any file with
+///   filter chain can't handle: failed the whole job on any file with
 ///   embedded cover art (several real library files hit this). `-map
-///   0:v:0` selects only the first video stream — the actual content,
+///   0:v:0` selects only the first video stream: the actual content,
 ///   never the attached-pic that (per `ffprobe::probe`'s own convention)
-///   always comes after it — so cover art is silently dropped rather than
+///   always comes after it, so cover art is silently dropped rather than
 ///   crashing the encode.
 /// - mp4 sources using `mov_text` subtitles aren't valid inside Matroska
 ///   via stream copy and failed the whole job. `subtitle_codec_args`
@@ -66,38 +66,38 @@ pub fn target_bitrate_kbps(width: i64, height: i64, cfg: &TranscodeConfig) -> u3
 ///   (so an already-Matroska-compatible `ass`/`srt` track keeps its
 ///   styling rather than being flattened).
 ///
-/// Rate control mode is `ICQ`, not `QVBR` — a live validation run found
+/// Rate control mode is `ICQ`, not `QVBR`: a live validation run found
 /// Hestia's iHD driver rejects `QVBR` outright ("Driver does not support
 /// QVBR RC mode (supported modes: CQP, CBR, VBR, ICQ)"), despite `ffmpeg -h
 /// encoder=av1_vaapi` listing `QVBR` as a libavcodec-level option; the
 /// *driver* is the actual authority on what's usable, and libavcodec
 /// doesn't validate that ahead of time. `ICQ` is the quality-driven mode
-/// this driver actually has, so it's the correct target regardless — the
+/// this driver actually has, so it's the correct target regardless: the
 /// `-b:v`/`-maxrate`/`-bufsize` ceiling stays as a best-effort cap (harmless
 /// if this driver ignores it under ICQ; `encode_and_verify`'s post-encode
 /// `is_beneficial` check is the actual hard guarantee either way, not this).
 ///
 /// `-loglevel error` suppresses ffmpeg's default per-frame progress output
 /// (`frame=... fps=... bitrate=... speed=...`, one line per progress tick)
-/// — for a long encode this otherwise accumulates to megabytes in the
+/// : for a long encode this otherwise accumulates to megabytes in the
 /// `Command::output()`-captured stderr buffer, which is pure noise in a
 /// failure's stored `error` text and unnecessary memory held by the parent
 /// process for the whole encode's duration.
 ///
 /// Decode is `-hwaccel vaapi` but deliberately *without*
-/// `-hwaccel_output_format vaapi` — a live validation run found that
+/// `-hwaccel_output_format vaapi`: a live validation run found that
 /// combination fails even on the simplest possible single-stream input
 /// ("Impossible to convert between the formats supported by the filter
 /// 'Parsed_null_0' and the filter 'auto_scale_0'" / "Function not
 /// implemented"), because it makes ffmpeg keep the decoded frame
 /// GPU-resident and then implicitly spin up a *second*, separate VAAPI
-/// device context to bridge into the encoder — the two contexts don't
+/// device context to bridge into the encoder: the two contexts don't
 /// negotiate a compatible format with each other on this driver, wrong
 /// devices or not. Explicitly downloading to a normal system-memory frame
 /// (`-hwaccel_output_format` omitted) and re-uploading through the *same*
 /// device context via `-vf format=nv12,hwupload` avoids that implicit
 /// second context entirely, and is what actually produces a valid,
-/// decodable AV1 output in practice — confirmed against real hardware
+/// decodable AV1 output in practice: confirmed against real hardware
 /// before trusting it further.
 fn run_ffmpeg_encode_live_action(
     input: &Path,
@@ -152,17 +152,17 @@ fn run_ffmpeg_encode_live_action(
 }
 
 /// Anime pipeline: software `libsvtav1` at 10-bit (`yuv420p10le`), CRF-driven
-/// (no bitrate ceiling — this is pure quality-mode, unlike the live-action
+/// (no bitrate ceiling; this is pure quality-mode, unlike the live-action
 /// path). Two reasons this isn't just `run_ffmpeg_encode_live_action` with a
 /// different quality number:
 ///
-/// 1. No hardware AV1 10-bit encode exists on Hestia's Arc A380 — `vainfo`
+/// 1. No hardware AV1 10-bit encode exists on Hestia's Arc A380: `vainfo`
 ///    only lists `VAProfileAV1Profile0` (8-bit). Anime art (flat color
 ///    fields, gradient shading/skies) shows 8-bit banding far more readily
 ///    than live-action's grain/texture does at an equivalent bitrate, so
 ///    getting true 10-bit output is worth trading GPU offload for CPU time.
 /// 2. `av1_vaapi` exposes no tune/animation-specific options at all (its
-///    `AVOption` list is rate-control/GOP-structure knobs only) — a
+///    `AVOption` list is rate-control/GOP-structure knobs only); a
 ///    meaningfully different anime pipeline wasn't achievable on the
 ///    hardware encoder regardless of quality value chosen.
 ///
@@ -176,17 +176,17 @@ fn run_ffmpeg_encode_live_action(
 /// `-map 0:v:0`, `mov_text` subtitles converted to `srt`) apply here too.
 ///
 /// `max_threads` is passed through as `-svtav1-params lp=N` (SVT-AV1's own
-/// "logical processors" cap) — a real validation run on Hestia's 6c/12t box
+/// "logical processors" cap): a real validation run on Hestia's 6c/12t box
 /// let `libsvtav1` use every thread at once with no explicit bound, and a
 /// single 1080p episode grew to **9.3GB resident memory** before the kernel
 /// OOM-killer took it out (no other services lost, but a second real OOM
 /// incident is a second time too many). SVT-AV1's memory use scales with
-/// both preset and thread count — more parallel workers means more
-/// concurrently-buffered lookahead/reference frames — so capping threads
+/// both preset and thread count: more parallel workers means more
+/// concurrently-buffered lookahead/reference frames, so capping threads
 /// bounds peak memory to something predictable regardless of how many
 /// cores the host actually has, independent of whatever preset is chosen.
 ///
-/// `-loglevel error` for the same reason as the live-action encoder — this
+/// `-loglevel error` for the same reason as the live-action encoder: this
 /// path runs for tens of minutes per file, and unsuppressed progress output
 /// would otherwise dominate the captured stderr buffer for that whole time.
 fn run_ffmpeg_encode_anime(
@@ -233,12 +233,12 @@ fn run_ffmpeg_encode_anime(
 /// Per-subtitle-stream `-c:s:{i}` codec args, in the same order `-map
 /// 0:s?` presents them in the output. `mov_text` (mp4's timed-text codec)
 /// isn't valid inside the Matroska container this pipeline always writes,
-/// so it's converted to `srt` — a lossless format change for plain timed
-/// text. Everything else (`ass`, `srt`, etc. — already Matroska-compatible)
+/// so it's converted to `srt`: a lossless format change for plain timed
+/// text. Everything else (`ass`, `srt`, etc.; already Matroska-compatible)
 /// is copied untouched rather than flattened through a lossy re-encode.
-/// Pulled out as its own pure function so this exact per-stream decision —
-/// the thing that made every mp4-sourced file with subtitles fail outright
-/// — has direct unit coverage without needing a real ffmpeg encode.
+/// Pulled out as its own pure function so this exact per-stream decision,
+/// the thing that made every mp4-sourced file with subtitles fail outright,
+/// has direct unit coverage without needing a real ffmpeg encode.
 fn subtitle_codec_args(subtitles: &[ffprobe::SubtitleStream]) -> Vec<String> {
     subtitles
         .iter()
@@ -250,18 +250,18 @@ fn subtitle_codec_args(subtitles: &[ffprobe::SubtitleStream]) -> Vec<String> {
         .collect()
 }
 
-/// The temp path a given job's encode writes to — job-id-scoped (not just
+/// The temp path a given job's encode writes to: job-id-scoped (not just
 /// derived from the input filename) so two jobs can never collide on the
 /// same temp file even if something ends up processing the same
 /// `episode_file` path twice (e.g. a daemon restart racing a still-live
 /// `transcode-library` backfill process). Also what `reset_orphaned_
 /// running_jobs` uses to find and clean up a crashed job's leftover partial.
 ///
-/// Written into the *library* directory (same filesystem as the original —
+/// Written into the *library* directory (same filesystem as the original,
 /// required for the atomic rename-based swap in `finalize_job`, never a
 /// separate staging drive) for however long the encode takes (minutes to
 /// hours). Deliberately given a non-video final extension (`.tmp`, not
-/// `.mkv`) and a leading dot: a real production shape found in review — a
+/// `.mkv`) and a leading dot: a real production shape found in review, a
 /// growing `....mkv` sitting mid-encode in the library was itself picked up
 /// by `collect_video_files`/`walk_files` (both filter on `VIDEO_EXTS`), so
 /// `find_relinkable_episode_files` saw two candidate files for the same
@@ -275,7 +275,7 @@ fn subtitle_codec_args(subtitles: &[ffprobe::SubtitleStream]) -> Vec<String> {
 ///
 /// Known cosmetic limitation, unrelated to the above: `finalize_job`
 /// renames this over the *original* path verbatim, keeping whatever
-/// extension the source had — an `.mp4` source ends up as Matroska bytes at
+/// extension the source had: an `.mp4` source ends up as Matroska bytes at
 /// an `.mp4` path (Jellyfin content-sniffs, so playback isn't affected, but
 /// `episode_file.path`'s extension no longer matches the real container).
 /// Not fixed here; would need the rename plus an `episode_file.path` update
@@ -289,12 +289,12 @@ fn temp_path_for(input: &Path, job_id: i64) -> PathBuf {
 }
 
 /// What `encode_and_verify` decided to do. Distinct from a hard `Err` (an
-/// actual failure — ffmpeg crashed, output was corrupt, duration mismatched)
-/// — both `AlreadyAv1` and `NotBeneficial` are successful, deliberate
+/// actual failure: ffmpeg crashed, output was corrupt, duration mismatched);
+/// both `AlreadyAv1` and `NotBeneficial` are successful, deliberate
 /// no-ops: nothing went wrong, there's just no transcode worth keeping.
 #[derive(Debug)]
 enum EncodeOutcome {
-    /// The input was already AV1 — no encode was even attempted.
+    /// The input was already AV1: no encode was even attempted.
     AlreadyAv1,
     /// An encode ran (or was skipped pre-emptively) but the result wasn't
     /// meaningfully smaller than the original, so it was discarded rather
@@ -306,35 +306,35 @@ enum EncodeOutcome {
 
 /// The blocking half of a transcode: encode to a temp file alongside the
 /// original (same filesystem, required for the atomic rename-based swap
-/// later — never a separate staging drive), then verify the result is
+/// later; never a separate staging drive), then verify the result is
 /// actually good *before* anything touches the original. Leaves the temp
 /// file on disk only for the `Encoded` outcome (the caller finalizes the
 /// swap under the DB lock); cleans it up itself in every other case, so the
 /// original is never at risk regardless of what happens here.
 ///
 /// Returns `AlreadyAv1` (no encode run at all) if the input turns out to
-/// already be AV1 — checked fresh against the real file here, not trusted
+/// already be AV1: checked fresh against the real file here, not trusted
 /// from whatever `media_file_probe` said when the job was claimed. This is
 /// what makes a job that's re-run after a crash between the file-swap
-/// rename and the DB bookkeeping (a narrow but real window — see
+/// rename and the DB bookkeeping (a narrow but real window; see
 /// `finalize_job`) self-correct into a no-op instead of re-encoding an
 /// already-AV1 file a second time. `force_reencode` (set only by
 /// `find_oversized_av1_candidates`'s remediation jobs) skips this check
-/// entirely — for a file that's already AV1 but was mis-encoded (e.g. left
+/// entirely: for a file that's already AV1 but was mis-encoded (e.g. left
 /// larger than its original by the rate-control bug this whole module's
 /// history is built around), "already AV1" is exactly the case that *does*
 /// need a real re-encode, not a no-op. The `is_beneficial` check further
-/// down still applies unconditionally either way — forcing a re-encode
+/// down still applies unconditionally either way: forcing a re-encode
 /// attempt never bypasses the "never keep a non-improvement" guarantee.
 ///
 /// Returns `NotBeneficial` in two cases: (1) a pre-check, before spending
 /// any GPU/CPU time, when the source's current bitrate is already at or
-/// below `skip_below_ceiling_ratio` of the resolution-scaled ceiling — a
+/// below `skip_below_ceiling_ratio` of the resolution-scaled ceiling: a
 /// strong signal there's little room to save; (2) after encoding, if the
 /// result isn't at least `min_size_reduction_pct` smaller than the
 /// original. (2) is the actual hard guarantee against a real incident where
 /// flat-bitrate rate control silently produced outputs *larger* than the
-/// original on most of a real backfill — regardless of how well-tuned the
+/// original on most of a real backfill; regardless of how well-tuned the
 /// rate control is, this is what makes "never keep a non-improvement" true
 /// unconditionally.
 #[allow(clippy::too_many_arguments)]
@@ -359,7 +359,7 @@ fn encode_and_verify(
         }
     }
     // Any other outcome (a different codec, or the probe itself failing)
-    // falls through to a real encode attempt as normal — the check above
+    // falls through to a real encode attempt as normal: the check above
     // exists only to short-circuit the one case where there's provably
     // nothing to do. A failed probe means no subtitle info either, so
     // `subtitle_codec_args` just gets an empty slice (falls back to
@@ -406,7 +406,7 @@ fn encode_and_verify(
 
     let decode_check = match original_duration {
         Some(duration) => ffprobe::verify_decodable_sampled(&tmp_path, duration, cfg.verify_sample_secs),
-        // Duration unknown — can't pick sample windows sensibly, so fall
+        // Duration unknown: can't pick sample windows sensibly, so fall
         // back to the thorough full-file check rather than guess.
         None => ffprobe::verify_decodable(&tmp_path),
     };
@@ -456,18 +456,18 @@ fn encode_and_verify(
 /// regardless of how well any rate-control tuning holds up: an output only
 /// counts as worth keeping if it's at least `min_size_reduction_pct`
 /// smaller than the original. Pulled out as its own pure function so this
-/// exact arithmetic — the thing a real incident got wrong — has direct unit
+/// exact arithmetic (the thing a real incident got wrong) has direct unit
 /// coverage without needing a real ffmpeg encode to exercise it.
 fn is_beneficial(original_bytes: u64, new_bytes: u64, min_size_reduction_pct: f64) -> bool {
     let max_allowed_bytes = (original_bytes as f64 * (1.0 - min_size_reduction_pct)) as u64;
     new_bytes <= max_allowed_bytes
 }
 
-/// Whether `media_item_id` is anime per metadata — same two membership
+/// Whether `media_item_id` is anime per metadata: same two membership
 /// checks (`anime_mapping` for TV, `anime_tmdb_movie` for movies) already
 /// used elsewhere for scoring/upgrade exclusions. Known to have real
 /// coverage gaps (Avatar: The Last Airbender and some Dragon Ball movies
-/// were missing from these tables) — `is_anime_content` below is the
+/// were missing from these tables); `is_anime_content` below is the
 /// combined check that should actually be used for routing; this is kept
 /// as its own function since other callers (`scheduler.rs`'s search
 /// routing) still want the metadata-only check.
@@ -489,7 +489,7 @@ pub fn is_anime(conn: &Connection, media_item_id: i64) -> Result<bool> {
     Ok(result)
 }
 
-/// Whether `path` falls under one of `cfg.anime_root_folders` — a plain
+/// Whether `path` falls under one of `cfg.anime_root_folders`: a plain
 /// prefix match. Deliberately independent of any DB metadata: it's how the
 /// library is actually organized on disk, and it's what catches the real
 /// gaps in `anime_mapping`/`anime_tmdb_movie` coverage (see `is_anime`'s
@@ -501,7 +501,7 @@ pub fn is_anime_path(path: &Path, cfg: &TranscodeConfig) -> bool {
 /// The combined anime check every enqueue site should use to decide which
 /// encode pipeline (`run_ffmpeg_encode_anime` vs `_live_action`) a file
 /// gets routed to: path-based first (cheap, no DB access, and the more
-/// reliable signal — see `is_anime_path`), falling back to the
+/// reliable signal; see `is_anime_path`), falling back to the
 /// metadata-based `is_anime` check for anime content filed outside the
 /// configured anime root folders.
 pub fn is_anime_content(
@@ -516,10 +516,10 @@ pub fn is_anime_content(
     is_anime(conn, media_item_id)
 }
 
-/// Resets any `running` job back to `pending` — call once at process
+/// Resets any `running` job back to `pending`: call once at process
 /// startup (the daemon itself, and the `transcode-library` backfill), never
 /// mid-run. `running` only ever means "some still-alive process is
-/// currently encoding this" — a row left in that state at startup can only
+/// currently encoding this": a row left in that state at startup can only
 /// mean the process that claimed it is gone (crashed, killed, power loss),
 /// since a live process's own in-flight jobs aren't visible to it as
 /// leftover state, they're just still running. Left unreset, a crash leaves
@@ -527,7 +527,7 @@ pub fn is_anime_content(
 /// shrinking real capacity forever instead of just costing one retry.
 ///
 /// Also sweeps each reset job's expected temp file (`temp_path_for`, which
-/// is job-id-scoped precisely so this lookup is unambiguous) — a killed
+/// is job-id-scoped precisely so this lookup is unambiguous); a killed
 /// encode leaves a partial `.jobN.av1.mkv` behind that nothing else will
 /// ever clean up, and on a library disk that's usually already tight on
 /// space these accumulate for real over a big backfill.
@@ -559,12 +559,12 @@ pub fn reset_orphaned_running_jobs(conn: &Connection) -> Result<usize> {
 }
 
 /// Queues one file for transcoding. `original_codec`/`original_bytes` are
-/// just recorded for the eventual report — not used for any decision.
+/// just recorded for the eventual report; not used for any decision.
 /// `is_anime` is decided once here (by the caller, via `is_anime_content`)
 /// and carried on the job row so `claim_pending_jobs` can dispatch to the
 /// right encode pipeline without re-deriving it at claim time. Every normal
 /// enqueue site passes `force_reencode: false`; `true` is only for
-/// `find_oversized_av1_candidates`'s remediation jobs — see
+/// `find_oversized_av1_candidates`'s remediation jobs; see
 /// `encode_and_verify`'s doc comment for why that flag exists.
 pub fn enqueue(
     conn: &Connection,
@@ -583,14 +583,14 @@ pub fn enqueue(
 }
 
 /// The single source of truth for "should this freshly-imported file be
-/// queued for transcoding at all" — every enqueue site (`import_one`,
+/// queued for transcoding at all": every enqueue site (`import_one`,
 /// season-pack import) must go through this rather than re-deriving its own
 /// subset of the rules. Called after `ensure_probed`, once real ffprobe
-/// data (codec/hdr/height) exists for the file — the codec/hdr/height
+/// data (codec/hdr/height) exists for the file: the codec/hdr/height
 /// parameters come from that probe, not from anything parsed off the
 /// release title.
 ///
-/// No longer excludes anime — anime now has its own encode pipeline
+/// No longer excludes anime: anime now has its own encode pipeline
 /// (`run_ffmpeg_encode_anime`, see `is_anime_content`) instead of being
 /// skipped outright. A pure function now that anime is out of it (no DB
 /// access needed to decide codec/HDR/height eligibility).
@@ -601,7 +601,7 @@ pub fn should_enqueue(
     cfg: &TranscodeConfig,
 ) -> bool {
     // A `probe_failed` row has NULL codec/height (see `ensure_probed`), not a
-    // missing row — without this check `should_enqueue` would happily enqueue
+    // missing row: without this check `should_enqueue` would happily enqueue
     // a job for it. `claim_pending_jobs` requires `p.width`/`p.height IS NOT
     // NULL` so that job can never be claimed, and the unique partial index on
     // (pending/running) then permanently blocks any future, real enqueue for
@@ -623,14 +623,14 @@ pub fn should_enqueue(
 
 /// Every existing-library file eligible for the `transcode-library` backfill:
 /// not already AV1, not HDR/2160p+ (per `cfg.exclude_hdr` /
-/// `cfg.exclude_min_height` — the first pass is scoped to SDR 1080p/720p),
+/// `cfg.exclude_min_height`: the first pass is scoped to SDR 1080p/720p),
 /// not already queued, done, or `skipped` (a completed encode that
-/// `finalize_job` rejected as not-beneficial — re-selecting it here would
+/// `finalize_job` rejected as not-beneficial: re-selecting it here would
 /// re-run the full encode from scratch every time this backfill runs, only
 /// to reject it again; a genuinely `failed` job *is* re-selected, since a
-/// transient failure — disk full, transient ffmpeg crash — deserves a retry
+/// transient failure (disk full, transient ffmpeg crash) deserves a retry
 /// on the next manual run). Anime is included (routed to its own
-/// pipeline, not excluded) — `is_anime` on each candidate is the metadata
+/// pipeline, not excluded); `is_anime` on each candidate is the metadata
 /// half of that decision; combined with the path-based check
 /// (`is_anime_path`) in Rust after the query, since a dynamic list of path
 /// prefixes (`cfg.anime_root_folders`) doesn't fit cleanly into static SQL.
@@ -672,12 +672,12 @@ pub fn find_backlog_candidates(conn: &Connection, cfg: &TranscodeConfig) -> Resu
 }
 
 /// Every file whose *most recent* transcode attempt succeeded (`done`) but
-/// wasn't actually beneficial by the current `min_size_reduction_pct` bar —
+/// wasn't actually beneficial by the current `min_size_reduction_pct` bar:
 /// the 476-file legacy of a real rate-control bug that left files larger
 /// than their original, back before `is_beneficial` existed as a hard
 /// invariant. These are already AV1 (`find_backlog_candidates` excludes
 /// them for exactly that reason), and their pre-transcode originals are
-/// long gone — the only way to reclaim the space is to re-transcode the
+/// long gone: the only way to reclaim the space is to re-transcode the
 /// current, oversized AV1 file itself, which needs `enqueue`'s
 /// `force_reencode: true` to get past `encode_and_verify`'s normal
 /// already-AV1 short-circuit. The `WITH latest_job` CTE picks each file's
@@ -738,7 +738,7 @@ pub struct BacklogCandidate {
 }
 
 /// A `transcode_job` row claimed for processing this cycle, with the
-/// probe/path data `encode_and_verify` needs already attached — claimed
+/// probe/path data `encode_and_verify` needs already attached: claimed
 /// under the DB lock, then the actual encode runs entirely outside it.
 struct ClaimedJob {
     job_id: i64,
@@ -755,16 +755,16 @@ struct ClaimedJob {
 /// `anime_limit` anime jobs (marking them `running` so a crash mid-cycle
 /// doesn't leave them silently re-claimable forever without at least
 /// having been attempted once) and returns everything the encode step
-/// needs. Only claims jobs whose file already has probe data — a job
+/// needs. Only claims jobs whose file already has probe data: a job
 /// enqueued moments after import but before `ensure_probed` has run yet
 /// simply isn't claimed this tick, and picks up naturally on the next one.
 ///
-/// The two limits are enforced **independently** — a real gap found after
+/// The two limits are enforced **independently**: a real gap found after
 /// raising the live-action cap for a validated GPU-scaling reason: a single
 /// shared cap would let "raise GPU parallelism" silently also raise anime
 /// (CPU-bound, thread-hungry) concurrency to something never load-tested.
 /// Each limit is treated as a *total* concurrency target for its own
-/// pipeline, not "claim this many more" — first reduced by however many
+/// pipeline, not "claim this many more": first reduced by however many
 /// jobs of that same pipeline are already `running` (set by anyone: this
 /// same daemon's previous still-in-flight cycle, or a separately-invoked
 /// `transcode-library`/`retranscode-oversized` process hitting the same
@@ -775,7 +775,7 @@ struct ClaimedJob {
 /// simultaneous GPU encodes and OOMing the host. `status='running'` is
 /// shared database state, not per-process, so counting it is what makes
 /// this a real global cap no matter how many processes are hitting this
-/// table at once — and wrapping each pipeline's count+select+update in one
+/// table at once, and wrapping each pipeline's count+select+update in one
 /// `BEGIN IMMEDIATE` transaction (rather than separate statements, and both
 /// pipelines in the *same* transaction) is what stops two processes from
 /// both reading the same low count and both claiming past the limit before
@@ -800,7 +800,7 @@ async fn claim_pending_jobs(
             continue;
         }
 
-        // Highest current bitrate first (within this pipeline) — the worst
+        // Highest current bitrate first (within this pipeline): the worst
         // offenders (REMUX, huge season packs) free the most space per
         // file transcoded, so they're worth reaching before smaller,
         // already-reasonable files.
@@ -846,13 +846,13 @@ async fn claim_pending_jobs(
 /// `episode_file` (new size + `upgrade_locked = 1`, the flag that keeps the
 /// upgrade cycle from ever trying to replace a file breadarr itself just
 /// intentionally shrank), and forces a fresh `ensure_probed` so
-/// `media_file_probe` reflects the real AV1 ground truth — same shape as
+/// `media_file_probe` reflects the real AV1 ground truth: same shape as
 /// `remux_one_backlog_file`. On failure, the original is left completely
 /// untouched; the job is marked `failed` with the error recorded, no
 /// automatic retry.
 ///
 /// `AlreadyAv1`/`NotBeneficial` from the encode step are both marked `done`/
-/// `skipped` respectively with no byte-count change and no swap — neither
+/// `skipped` respectively with no byte-count change and no swap: neither
 /// is a failure, there's just nothing to keep.
 ///
 /// The whole swap-and-bookkeeping sequence runs inside a closure so any
@@ -889,7 +889,7 @@ async fn finalize_job(
             // practice (the temp file is gone), so if these two writes were
             // separate auto-committed statements and the second one failed,
             // the on-disk file would already be the smaller AV1 encode while
-            // `upgrade_locked` stayed 0 — leaving it exactly as eligible for
+            // `upgrade_locked` stayed 0: leaving it exactly as eligible for
             // the ordinary upgrade cycle to "improve" as any untouched file,
             // silently replacing a deliberate, already-paid-for shrink with
             // a much larger release. Wrapping both in one transaction means
@@ -909,12 +909,12 @@ async fn finalize_job(
 
             // Best-effort from here: `ensure_probed` only refreshes
             // `media_file_probe`'s descriptive fields (codec/height/etc, fed
-            // to `find_backlog_candidates` and library-health reporting) —
+            // to `find_backlog_candidates` and library-health reporting);
             // it already never propagates an *ffprobe* failure (see its own
             // doc comment: "probing must never abort a scan or import"), so
             // an `Err` here means a genuine DB-level error, most likely
-            // transient. The facts that actually matter —  the file is now
-            // AV1, its new size, and `upgrade_locked` — are already durably
+            // transient. The facts that actually matter (the file is now
+            // AV1, its new size, and `upgrade_locked`) are already durably
             // committed above; failing the whole job over a stale probe row
             // would misreport a successful transcode as `failed`.
             if let Err(e) = importer::ensure_probed(&conn, job.episode_file_id, &job.path) {
@@ -983,11 +983,11 @@ impl TranscodeCycleStats {
 
 /// The live-action pipeline's parallelism given how many real Jellyfin
 /// transcode sessions are active right now: `budget` (`parallelism_max`,
-/// the measured total GPU concurrency ceiling — see its doc comment) minus
+/// the measured total GPU concurrency ceiling; see its doc comment) minus
 /// however many streams Jellyfin itself is actually using, floored at 0.
 /// Reserves *exactly* the GPU headroom real viewers need instead of
 /// dropping to a flat `parallelism_min` regardless of whether 1 or 5
-/// people are watching — the whole point of measuring the real ceiling
+/// people are watching: the whole point of measuring the real ceiling
 /// (rather than guessing) is to spend the difference precisely. Pulled out
 /// as its own pure function for direct unit coverage without needing a
 /// real (or mocked) `JellyfinClient`.
@@ -997,11 +997,11 @@ fn live_action_parallelism_for(budget: usize, active_jellyfin_sessions: usize) -
 
 /// Active parallelism for this cycle, returned as `(live_action, anime)`.
 /// Live-action: `live_action_parallelism_for(cfg.parallelism_max,
-/// active_sessions)` — dynamically reserves exactly as many GPU streams as
+/// active_sessions)`: dynamically reserves exactly as many GPU streams as
 /// Jellyfin is actually using, since Jellyfin transcoding contends for the
 /// same encode/decode engines the batch job does. Anime: still a flat
 /// `parallelism_max_anime`/`parallelism_min` binary switch on *any* active
-/// session — the CPU-bound anime pipeline doesn't contend for the GPU the
+/// session: the CPU-bound anime pipeline doesn't contend for the GPU the
 /// way live-action does, so it isn't part of this dynamic reservation (per
 /// explicit user direction: "for the live action ones"); it still backs
 /// off to `parallelism_min` (not eliminated, just conservative) whenever
@@ -1028,20 +1028,20 @@ async fn effective_parallelism(jellyfin: Option<&JellyfinClient>, cfg: &Transcod
 
 /// One transcode-worker pass across both pipelines. Runs
 /// `run_pipeline_cycle` for live-action and anime *concurrently* via
-/// `tokio::join!` and merges their stats — see that function's doc
+/// `tokio::join!` and merges their stats; see that function's doc
 /// comment for why they must not share one claim-spawn-join batch.
 ///
 /// Deliberately `join!`, not `try_join!`: `try_join!` cancels (drops) the
 /// other branch's future the instant either one returns `Err`, and dropping
 /// a `JoinSet` of `spawn_blocking` encode tasks cannot abort work that has
-/// already started — the ffmpeg/SVT-AV1 process keeps running to completion
+/// already started: the ffmpeg/SVT-AV1 process keeps running to completion
 /// with its result simply discarded, `finalize_job` never runs for it, and
 /// its `transcode_job` row is stuck `status='running'` (consuming
 /// concurrency budget and leaving its multi-GB temp file on disk) until the
 /// daemon restarts. `run_pipeline_cycle` itself now treats a
 /// `claim_pending_jobs` error as "claim nothing this iteration" rather than
 /// propagating it, so in practice this only guards a pipeline that fails for
-/// some other reason — but `join!` means even that failure can no longer
+/// some other reason, but `join!` means even that failure can no longer
 /// take the other, healthy pipeline's in-flight work down with it. Each
 /// pipeline's error is logged and treated as an empty cycle rather than
 /// failing the whole `run_cycle` call. Shared by both the steady-state
@@ -1071,18 +1071,18 @@ pub async fn run_cycle(
 /// available for *this* pipeline only (the other pipeline's limit is passed
 /// as 0, so `claim_pending_jobs` naturally claims nothing for it), spawns
 /// each newly claimed job, and as soon as any one of them finishes,
-/// finalizes it and immediately loops back to claim a replacement — rather
+/// finalizes it and immediately loops back to claim a replacement: rather
 /// than waiting for the whole batch to drain before claiming more. Exits
 /// once a claim attempt comes back empty and nothing is left in flight.
 ///
 /// This replaces an earlier design where one shared claim+spawn+join batch
 /// covered both pipelines at once: claimed jobs from both pipelines were
-/// joined together, so the *whole* batch — and therefore any new claim for
-/// either pipeline — blocked until every job in it finished. A single long
+/// joined together, so the *whole* batch (and therefore any new claim for
+/// either pipeline) blocked until every job in it finished. A single long
 /// anime file (feature-length movies can take over an hour via the
 /// CPU-bound SVT-AV1 path) would leave the GPU-bound live-action pipeline
 /// sitting completely idle for that entire duration despite having its own
-/// independent concurrency budget and a large backlog of its own —
+/// independent concurrency budget and a large backlog of its own:
 /// discovered in production: 512 pending live-action jobs and a budget of 7,
 /// but the GPU sat unused for the better part of an hour waiting on one
 /// anime movie to join. Running each pipeline as its own independent
@@ -1093,8 +1093,8 @@ pub async fn run_cycle(
 /// in order: a real validation run surfaced that the naive
 /// awaited-in-claim-order approach leaves a fast job's already-finished
 /// result (verified output sitting on disk, or even a fast failure) fully
-/// idle — not written back to the DB, not freeing its slot for the next
-/// claim — for as long as whichever job happens to be *earlier* in claim
+/// idle: not written back to the DB, not freeing its slot for the next
+/// claim, for as long as whichever job happens to be *earlier* in claim
 /// order (highest-bitrate-first, so often the largest file) keeps running.
 /// `join_next_with_id`'s `(Id, T)`/`JoinError::id()` pairing is what lets a
 /// panicked task still be matched back to its `ClaimedJob` (a panic doesn't
@@ -1125,7 +1125,7 @@ async fn run_pipeline_cycle(
         // and in `run_cycle` that used to cancel the *other* pipeline's
         // future mid-flight via `try_join!`, orphaning its already-running
         // encodes (see `run_cycle`'s doc comment). Skip claiming new work
-        // this iteration instead — whatever's already in `set` keeps
+        // this iteration instead: whatever's already in `set` keeps
         // draining normally, and the next tick retries the claim.
         let claimed = match claim_pending_jobs(&conn, live_action_limit, anime_limit).await {
             Ok(claimed) => claimed,
@@ -1148,7 +1148,7 @@ async fn run_pipeline_cycle(
         }
 
         // `None` here means this claim found nothing new *and* nothing from
-        // an earlier claim is still in flight — this pipeline's queue is
+        // an earlier claim is still in flight: this pipeline's queue is
         // genuinely empty for now.
         let Some(joined) = set.join_next_with_id().await else {
             break;
@@ -1265,7 +1265,7 @@ mod tests {
 
         let conn = Arc::new(Mutex::new(conn));
         // Asking for a total of 3 concurrent live-action, with 2 already
-        // running — should claim exactly 1 more, not 3 more. All seeded
+        // running: should claim exactly 1 more, not 3 more. All seeded
         // jobs default to is_anime=0 (live-action), so anime_limit=0 here
         // is correct, not a placeholder.
         let claimed = claim_pending_jobs(&conn, 3, 0).await.unwrap();
@@ -1323,13 +1323,13 @@ mod tests {
 
         let conn = Arc::new(Mutex::new(conn));
         let claimed = claim_pending_jobs(&conn, 2, 0).await.unwrap();
-        assert!(claimed.is_empty(), "already at the cap — must not claim more");
+        assert!(claimed.is_empty(), "already at the cap: must not claim more");
     }
 
     // Regression test for a real gap: raising the live-action cap for a
     // validated GPU-scaling reason must not silently also raise anime
     // concurrency (CPU-bound, thread-hungry, never load-tested at higher
-    // counts) — the two caps are enforced completely independently.
+    // counts): the two caps are enforced completely independently.
     #[tokio::test]
     async fn claim_pending_jobs_enforces_live_action_and_anime_caps_independently() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1428,7 +1428,7 @@ mod tests {
     // Regression test for a real gap found in review: the temp path used to
     // be produced via `input.with_extension("job{id}.av1.mkv")`, so a
     // multi-hour in-progress encode sat in the library as a normal-looking
-    // `.mkv` file — `collect_video_files`/`walk_files` (both filter purely
+    // `.mkv` file: `collect_video_files`/`walk_files` (both filter purely
     // on `VIDEO_EXTS`) would pick it up as a second candidate video file for
     // the same episode, and `library_scan`/Jellyfin could index or attempt
     // to play a still-encoding file. The fix must produce a path whose
@@ -1465,11 +1465,11 @@ mod tests {
     fn is_beneficial_rejects_growth_and_marginal_shrinkage() {
         // The real incident's shape: ~2.1GB HEVC -> ~4.9GB "AV1".
         assert!(!is_beneficial(2_100_000_000, 4_900_000_000, 0.10));
-        // Only a 5% reduction — below the 10% floor.
+        // Only a 5% reduction: below the 10% floor.
         assert!(!is_beneficial(1_000_000_000, 950_000_000, 0.10));
         // A real win: 15% smaller, clears the floor.
         assert!(is_beneficial(1_000_000_000, 850_000_000, 0.10));
-        // Exactly at the floor — inclusive.
+        // Exactly at the floor: inclusive.
         assert!(is_beneficial(1_000_000_000, 900_000_000, 0.10));
     }
 
@@ -1479,22 +1479,22 @@ mod tests {
     // count.
     #[test]
     fn live_action_parallelism_for_reserves_exactly_what_jellyfin_is_using() {
-        assert_eq!(live_action_parallelism_for(7, 0), 7, "no active viewers — use the full budget");
-        assert_eq!(live_action_parallelism_for(7, 1), 6, "one viewer — reserve exactly one stream");
-        assert_eq!(live_action_parallelism_for(7, 3), 4, "three viewers — reserve exactly three streams");
+        assert_eq!(live_action_parallelism_for(7, 0), 7, "no active viewers: use the full budget");
+        assert_eq!(live_action_parallelism_for(7, 1), 6, "one viewer: reserve exactly one stream");
+        assert_eq!(live_action_parallelism_for(7, 3), 4, "three viewers: reserve exactly three streams");
         assert_eq!(
             live_action_parallelism_for(7, 9),
             0,
-            "more active viewers than the whole budget — batch gets nothing, never negative"
+            "more active viewers than the whole budget: batch gets nothing, never negative"
         );
     }
 
     // Regression test for the second half of the same incident: several of
     // the 199 failures were files (some anime, notably) already efficient
-    // enough that transcoding them was never going to help — this is the
+    // enough that transcoding them was never going to help: this is the
     // pre-check that skips the encode attempt entirely rather than burning
     // GPU/CPU time to find that out the slow way. No real ffmpeg encode
-    // should run here — a huge fabricated duration forces the source
+    // should run here: a huge fabricated duration forces the source
     // bitrate calculation near zero regardless of resolution, so this stays
     // fast and deterministic.
     #[test]
@@ -1536,7 +1536,7 @@ mod tests {
     // stream with `attached_pic` disposition (a still image, ffmpeg reports
     // it as a normal `video`-type stream) alongside the real content stream.
     // The old blanket `-map 0` tried to re-encode this too, which the
-    // VAAPI/libsvtav1 encoders can't handle — failed the whole job on
+    // VAAPI/libsvtav1 encoders can't handle: failed the whole job on
     // several real library files (GoT, Avatar).
     fn generate_clip_with_attached_pic(dir: &Path) -> PathBuf {
         let path = dir.join("clip_with_cover_art.mkv");
@@ -1604,8 +1604,8 @@ mod tests {
         );
     }
 
-    // End-to-end regression test for the real "embedded cover art" incident
-    // — an attached-pic stream must no longer crash the whole encode.
+    // End-to-end regression test for the real "embedded cover art" incident:
+    // an attached-pic stream must no longer crash the whole encode.
     // Uses the anime (software) pipeline since it needs no VAAPI hardware.
     #[test]
     fn encode_and_verify_handles_a_source_with_attached_cover_art() {
@@ -1630,8 +1630,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // End-to-end regression test for the real "mov_text subtitle" incident
-    // — a mov_text track must be converted rather than crashing the encode.
+    // End-to-end regression test for the real "mov_text subtitle" incident:
+    // a mov_text track must be converted rather than crashing the encode.
     #[test]
     fn encode_and_verify_handles_a_source_with_a_mov_text_subtitle() {
         let dir = std::env::temp_dir().join(format!(
@@ -1659,7 +1659,7 @@ mod tests {
     // `libsvtav1` 10-bit encode of a deliberately bloated (lossless x264)
     // source should produce a verified, meaningfully smaller output. Doesn't
     // need real VAAPI hardware (unlike the live-action path) since
-    // `libsvtav1` is software — safe to run in any dev/CI environment that
+    // `libsvtav1` is software: safe to run in any dev/CI environment that
     // has an AV1-capable ffmpeg build.
     #[test]
     fn encode_and_verify_anime_pipeline_shrinks_a_bloated_source() {
@@ -1686,13 +1686,13 @@ mod tests {
 
     // Regression test for the remediation path: `force_reencode: true` must
     // bypass the normal "already AV1 -> nothing to do" short-circuit and
-    // attempt a real re-encode — this is the whole point of
+    // attempt a real re-encode: this is the whole point of
     // `find_oversized_av1_candidates`'s jobs, which target files that are
     // already AV1 but were left larger than their original by a real
     // rate-control bug. Uses a genuinely oversized AV1 source (a lossless
     // x264 clip re-encoded to AV1 at a high bitrate, deliberately bigger
-    // than what a sane target would produce) so the *second* pass — the one
-    // under test — has real room to shrink it.
+    // than what a sane target would produce) so the *second* pass (the one
+    // under test) has real room to shrink it.
     #[test]
     fn encode_and_verify_force_reencode_bypasses_the_already_av1_short_circuit() {
         let dir = std::env::temp_dir().join(format!(
@@ -1714,7 +1714,7 @@ mod tests {
             encode_and_verify(oversized_av1.clone(), 5, cfg(), 640, 480, Some(2.0), true, false).unwrap();
         assert!(matches!(unforced, EncodeOutcome::AlreadyAv1));
 
-        // is_anime: true — routes through the software libsvtav1 path, same
+        // is_anime: true; routes through the software libsvtav1 path, same
         // as the other end-to-end tests here, since this dev/CI environment
         // has no VAAPI hardware for the live-action path to use.
         let mut c = cfg();
@@ -1782,7 +1782,7 @@ mod tests {
     // Regression test for a real latency bug a live validation run
     // surfaced: `run_cycle` used to await claimed jobs' handles in claim
     // order (highest-bitrate-first), so a fast job's already-finished
-    // result sat idle — not written back to the DB — for as long as
+    // result sat idle (not written back to the DB) for as long as
     // whichever job happened to come *first* in that order kept running.
     // The fix (`JoinSet::join_next_with_id`) finalizes whichever job
     // actually finishes first, which raises a sharper risk worth its own
@@ -1801,11 +1801,11 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Claimed first (much higher bitrate) but genuinely slower — a
+        // Claimed first (much higher bitrate) but genuinely slower: a
         // real (tiny) SVT-AV1 encode, not a short-circuit.
         let slow_clip = generate_lossless_test_clip(&dir);
         let slow_id = 101i64;
-        // Claimed second (lower bitrate) but resolves almost immediately —
+        // Claimed second (lower bitrate) but resolves almost immediately:
         // already AV1, hits the `AlreadyAv1` short-circuit with no real
         // encode at all.
         let fast_clip = generate_test_clip(&dir, "libsvtav1");
@@ -1879,7 +1879,7 @@ mod tests {
         // must set `upgrade_locked` in the same transaction as the new
         // `size_bytes`, and a best-effort re-probe afterward must still
         // leave `media_file_probe` correctly reflecting the swapped-in AV1
-        // file — not the stale pre-encode codec, and not silently unset
+        // file: not the stale pre-encode codec, and not silently unset
         // just because that refresh is no longer allowed to fail the job.
         let (upgrade_locked, probed_codec): (i64, Option<String>) = conn
             .query_row(

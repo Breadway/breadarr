@@ -1,6 +1,6 @@
 name: dev release
 
-# Publishes a dev-track build on every push to `main` (the trunk branch —
+# Publishes a dev-track build on every push to `main` (the trunk branch;
 # there is no separate `dev` branch). See bread-ecosystem's
 # docs/release-channels.md for the release-track policy this is part of.
 on:
@@ -26,7 +26,7 @@ jobs:
           set -euo pipefail
           cd src
           # Base the dev version off the latest published stable tag, not
-          # Cargo.toml — Cargo.toml can go stale relative to the last real
+          # Cargo.toml: Cargo.toml can go stale relative to the last real
           # release, which would make a dev build sort as OLDER than what's
           # already installed and bakery would correctly refuse it.
           LATEST_TAG="$(git ls-remote --tags --refs \
@@ -36,7 +36,7 @@ jobs:
             CUR="${LATEST_TAG}"
           else
             # breadarr's own Cargo.toml is a virtual workspace manifest with
-            # no [workspace.package] version — breadarrd/Cargo.toml is the
+            # no [workspace.package] version; breadarrd/Cargo.toml is the
             # daemon crate's own version, used as the fallback instead.
             CUR="$(grep -m1 '^version' breadarrd/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
           fi
@@ -73,10 +73,10 @@ jobs:
               echo "signed ${bin}-x86_64"
             done
           else
-            echo "::warning::BAKERY_MINISIGN_SEC_KEY_PATH not set — shipping breadarrd-x86_64/breadarr-tui-x86_64 UNSIGNED"
+            echo "::warning::BAKERY_MINISIGN_SEC_KEY_PATH not set: shipping breadarrd-x86_64/breadarr-tui-x86_64 UNSIGNED"
           fi
 
-      # No GitHub Release upload step here — breadarr has no GitHub mirror,
+      # No GitHub Release upload step here: breadarr has no GitHub mirror,
       # and dev builds happen on every push and would spam a release per
       # commit anyway, so dl.breadway.dev/dev/ is the only distribution
       # point for this track.
@@ -87,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${MINISIGN_SEC_KEY:-}" ]; then
-            echo "::error::BAKERY_MINISIGN_SEC_KEY_PATH secret not set — refusing to regenerate dev index.json unsigned (would leave a stale signature mismatched against fresh content and break bakery for everyone on the dev track)"
+            echo "::error::BAKERY_MINISIGN_SEC_KEY_PATH secret not set: refusing to regenerate dev index.json unsigned (would leave a stale signature mismatched against fresh content and break bakery for everyone on the dev track)"
             exit 1
           fi
           rm -rf /tmp/bread-ecosystem-ci-* 2>/dev/null || true

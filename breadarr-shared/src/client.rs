@@ -14,7 +14,7 @@ pub struct DaemonClient {
 }
 
 impl DaemonClient {
-    /// `api_token` mirrors `config.daemon.api_token` server-side — empty
+    /// `api_token` mirrors `config.daemon.api_token` server-side: empty
     /// means "no auth configured," so this stays a no-op default header
     /// rather than sending a meaningless empty bearer token on every
     /// request. A non-empty token that cannot be encoded as an HTTP header
@@ -57,7 +57,7 @@ impl DaemonClient {
         Ok(matches!(resp, Ok(r) if r.status().is_success()))
     }
 
-    /// The richer health payload (per-cycle status, search_halted) — a
+    /// The richer health payload (per-cycle status, search_halted): a
     /// separate call from `health()` rather than folding this into it, so
     /// a caller that only needs the fast up/down check (a tight poll loop)
     /// isn't forced to also pay for parsing/holding the full detail.
@@ -189,7 +189,7 @@ impl DaemonClient {
             .context("add_movie response was not valid JSON")
     }
 
-    /// Manual "search now" for one show/movie's whole current backlog — can
+    /// Manual "search now" for one show/movie's whole current backlog: can
     /// take a while (jittered, one request per missing item), so callers
     /// should expect this to be slow, not instant.
     pub async fn search_now(&self, id: i64) -> Result<SearchNowResult> {
@@ -207,7 +207,7 @@ impl DaemonClient {
             .context("search_now response was not valid JSON")
     }
 
-    /// Scored (or gate-rejected) candidates for a movie, without grabbing —
+    /// Scored (or gate-rejected) candidates for a movie, without grabbing:
     /// the manual release picker. Same 600s allowance as `search_now` since
     /// it runs a real search under the hood.
     pub async fn movie_candidates(&self, media_item_id: i64) -> Result<Vec<ReleaseCandidate>> {
@@ -324,7 +324,7 @@ impl DaemonClient {
     }
 
     /// Deletes an episode's imported file (from disk, not just tracking) so
-    /// it can be re-grabbed — for a confirmed-wrong or broken file, not a
+    /// it can be re-grabbed: for a confirmed-wrong or broken file, not a
     /// routine action.
     pub async fn delete_episode_file(&self, episode_id: i64) -> Result<()> {
         self.client

@@ -21,7 +21,7 @@ fn to_dto(weights: &crate::scoring::profile::Weights) -> WeightsDto {
 }
 
 /// Lists every quality profile with its currently-effective weights
-/// (built-in defaults plus any stored override already applied) — never
+/// (built-in defaults plus any stored override already applied): never
 /// the raw, possibly-partial stored JSON, so a client always has a
 /// complete, concrete set of numbers to show and re-submit.
 pub async fn list(
@@ -60,7 +60,7 @@ pub async fn list(
 }
 
 /// Overwrites a profile's stored `weights` column with exactly the
-/// submitted values (a full replacement, not a partial patch) — the TUI
+/// submitted values (a full replacement, not a partial patch): the TUI
 /// always submits the complete resolved set it displayed, so there's no
 /// ambiguity about what "the rest stays as it was" would even mean here.
 pub async fn update_weights(

@@ -9,7 +9,7 @@ use ratatui::widgets::ListState;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Category roots the TUI's "Add" flow can place new items under — kept as
+/// Category roots the TUI's "Add" flow can place new items under: kept as
 /// two separate paths (not one shared default) since a series and a movie
 /// added with the same title must not collide on disk, and Jellyfin's
 /// per-category libraries only see files under their own category root.
@@ -18,13 +18,13 @@ pub struct LibraryRoots {
     pub movies: String,
 }
 
-/// Builds the per-item folder a freshly added series/movie lands in —
+/// Builds the per-item folder a freshly added series/movie lands in:
 /// `{root}/{Title} ({Year})`, matching the convention the importer already
 /// assumes (`import_one` places a movie's file directly inside its
 /// `media_item.root_folder`, with no further subfolder of its own, and
 /// `season_dir` does the same for a show's `Season NN` folders). Passing the
-/// bare category root straight through as `root_folder` — the bug this
-/// replaces — landed every new grab directly in that shared root instead of
+/// bare category root straight through as `root_folder`: the bug this
+/// replaces, landed every new grab directly in that shared root instead of
 /// its own show/movie folder.
 fn item_root_folder(root: &str, title: &str, year: Option<i64>) -> String {
     let sanitized: String = title
@@ -90,17 +90,17 @@ pub enum Focus {
     List,
     AddSearchInput,
     AddResults,
-    /// Incremental title filter on the Library list — `App::library_query`
+    /// Incremental title filter on the Library list: `App::library_query`
     /// holds the in-progress text, same priority-over-global-keys pattern
     /// as `AddSearchInput`.
     LibraryFilterInput,
-    /// The manual release picker overlay — `App::candidates` holds the
+    /// The manual release picker overlay: `App::candidates` holds the
     /// list, `App::candidates_episode_id` remembers which episode (or, if
     /// `None`, the open movie) it was fetched for so a grab can be
     /// submitted against the right target.
     Candidates,
     /// Text-entry mode for one weight axis on the Profiles tab's detail
-    /// view — `App::weight_input_buffer` holds the in-progress digits.
+    /// view: `App::weight_input_buffer` holds the in-progress digits.
     WeightInput,
 }
 
@@ -119,7 +119,7 @@ impl AddKind {
     }
 }
 
-/// Client-side filter over the already-fetched `media_items` — the server
+/// Client-side filter over the already-fetched `media_items`: the server
 /// has no filter/sort query params, and the library is small enough that
 /// refiltering the in-memory `Vec` on every keypress is free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,7 +232,7 @@ pub const WEIGHT_FIELDS: [WeightField; 9] = [
     ("hdr", |w| w.hdr, |w, v| w.hdr = v),
 ];
 
-/// A search hit tagged with which endpoint it came from — `run_add_search`
+/// A search hit tagged with which endpoint it came from: `run_add_search`
 /// queries series and movies together (see its doc comment for why), so
 /// each result needs to remember its own kind rather than the app tracking
 /// one global mode.
@@ -289,7 +289,7 @@ fn clamp_list_state(state: &mut ListState, len: usize) {
 }
 
 /// Row count of the Health tab's flagged-files list, including section
-/// headers — must stay in lockstep with `draw_library_health` so j/k
+/// headers: must stay in lockstep with `draw_library_health` so j/k
 /// doesn't walk off the rendered items.
 pub fn health_row_count(report: &LibraryHealthReport) -> usize {
     let mut n = 0;
@@ -316,7 +316,7 @@ pub struct App {
     pub tab: Tab,
     pub focus: Focus,
     pub status: String,
-    /// When `status` was last written — the draw loop clears it after a
+    /// When `status` was last written: the draw loop clears it after a
     /// few seconds so action feedback doesn't permanently hide the
     /// keybinding hints in the status bar.
     status_set_at: Option<Instant>,
@@ -333,17 +333,17 @@ pub struct App {
     pub media_items: Vec<MediaItemSummary>,
     pub media_state: ListState,
     /// Filtered+sorted indices into `media_items`, recomputed by
-    /// `recompute_library_view` — the top-level Library list and
+    /// `recompute_library_view`: the top-level Library list and
     /// `media_state` always operate over this, never over `media_items`
     /// directly, so filter/sort never has to touch the raw fetched data.
     pub library_view: Vec<usize>,
     pub library_filter: LibraryFilter,
     pub library_sort: LibrarySort,
-    /// Incremental title filter from `/` — applied on top of
+    /// Incremental title filter from `/`: applied on top of
     /// `library_filter`/`library_sort` inside `recompute_library_view`.
     pub library_query: String,
     pub detail: Option<MediaItemDetail>,
-    /// Selection within `detail.episodes` — separate from `media_state`
+    /// Selection within `detail.episodes`: separate from `media_state`
     /// since they're two different lists sharing the same tab.
     pub episode_state: ListState,
 
@@ -373,7 +373,7 @@ pub struct App {
 
     pub candidates: Vec<ReleaseCandidate>,
     pub candidates_state: ListState,
-    /// Which episode the current `candidates` list was fetched for —
+    /// Which episode the current `candidates` list was fetched for:
     /// `None` means it was fetched for the open movie itself.
     pub candidates_episode_id: Option<i64>,
 
@@ -384,14 +384,14 @@ pub struct App {
     pub confirm_delete: bool,
 
     /// Same two-press guard as `confirm_delete`, but for deleting an
-    /// imported *file* (not the whole tracked show/movie) — a separate
+    /// imported *file* (not the whole tracked show/movie): a separate
     /// flag since the two actions have different confirmation text and
     /// shouldn't arm each other.
     pub confirm_delete_file: bool,
 
     pub quality_profiles: Vec<QualityProfileSummary>,
     pub profiles_state: ListState,
-    /// The profile currently open for editing — separate from
+    /// The profile currently open for editing: separate from
     /// `quality_profiles` (like `detail` vs. `media_items`) so the two
     /// list levels (profiles, then that profile's weight axes) don't
     /// share a selection.
@@ -684,7 +684,7 @@ impl App {
 
     /// Rebuilds `library_view` from `media_items` under the current
     /// filter/sort, then re-selects whichever item was selected before (by
-    /// id, not raw index) if it's still in view — falls back to the first
+    /// id, not raw index) if it's still in view; falls back to the first
     /// item, or no selection if the view is now empty. Called after
     /// `media_items` changes, and after `library_filter`/`library_sort`
     /// change.
@@ -912,7 +912,7 @@ impl App {
     }
 
     /// Searches series and movies together instead of requiring the user to
-    /// pick a mode first — a prior single-mode-plus-toggle design left the
+    /// pick a mode first: a prior single-mode-plus-toggle design left the
     /// toggle bound to F2, which some terminals/window managers swallow
     /// before it ever reaches the TUI, silently stranding the search in the
     /// wrong mode with no visible error (a real, confusing dead end hit live:
@@ -994,7 +994,7 @@ impl App {
     }
 
     /// Manual "search now" for the show/movie currently open in the Library
-    /// detail view — can take a while (jittered, one request per missing
+    /// detail view: can take a while (jittered, one request per missing
     /// item), so this is spawned off the draw loop and the status line
     /// shows that work is in flight. A second press while busy is ignored.
     pub async fn search_now_selected(&mut self) {
@@ -1012,7 +1012,7 @@ impl App {
         }));
     }
 
-    /// Fetches candidates for whatever's selected in the open detail view —
+    /// Fetches candidates for whatever's selected in the open detail view:
     /// the currently-highlighted episode, or the movie itself if there's no
     /// episode list. Can take a while, same as `search_now_selected`, since
     /// it runs a real search under the hood.
@@ -1113,7 +1113,7 @@ impl App {
     }
 
     /// Seeds the edit buffer from the currently-selected weight axis's
-    /// value and switches focus into text-entry mode — mirrors the Add
+    /// value and switches focus into text-entry mode: mirrors the Add
     /// tab's search-input pattern (`Focus::AddSearchInput`), just for a
     /// numeric field instead of a search query.
     pub fn start_editing_selected_weight(&mut self) {
@@ -1136,7 +1136,7 @@ impl App {
     }
 
     /// Parses the edit buffer, applies it to the in-memory profile, and
-    /// submits the *complete* resolved weights set to the daemon — the API
+    /// submits the *complete* resolved weights set to the daemon: the API
     /// always overwrites the full stored JSON (see `update_weights`'s doc
     /// comment server-side), so every other axis has to be sent along
     /// unchanged, not just the one being edited.
@@ -1244,9 +1244,9 @@ impl App {
         }
     }
 
-    /// Deletes the imported file for whatever's selected — the movie
+    /// Deletes the imported file for whatever's selected: the movie
     /// itself if the open detail is a movie, or the currently-selected
-    /// episode otherwise — freeing it to be grabbed again. Same
+    /// episode otherwise, freeing it to be grabbed again. Same
     /// arm-then-confirm pattern as `delete_selected`, via
     /// `confirm_delete_file` instead so the two don't cross-arm.
     pub async fn delete_selected_file(&mut self) {
@@ -1321,7 +1321,7 @@ impl App {
     }
 
     /// Jumps from the selected Calendar row to that episode's Library
-    /// detail — same idea as `jump_to_stuck_target`, but also lands on the
+    /// detail: same idea as `jump_to_stuck_target`, but also lands on the
     /// matching SxxExx so `c`/`d` apply to the aired episode, not S01E01.
     pub async fn jump_to_calendar_entry(&mut self) {
         let Some(idx) = self.calendar_state.selected() else {

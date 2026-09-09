@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 static BTIH_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(?i)urn:btih:([0-9a-f]{40}|[2-7a-z]{32})").unwrap());
 
-/// Pulls a magnet link's own infohash out of it directly — no need to ask
+/// Pulls a magnet link's own infohash out of it directly: no need to ask
 /// qBittorrent to correlate anything when the caller already handed us the
 /// hash. Returns `None` for anything that isn't a magnet URI (e.g. nyaa's
 /// `.torrent`-file download URLs), which callers fall back to polling for.
@@ -14,7 +14,7 @@ pub(crate) fn extract_btih(link: &str) -> Option<String> {
     BTIH_RE.captures(link).map(|c| c[1].to_lowercase())
 }
 
-/// qBittorrent rejected a magnet outright (HTTP 200 with body "Fails.") —
+/// qBittorrent rejected a magnet outright (HTTP 200 with body "Fails."):
 /// deterministic for a given hash (a dead/unreachable torrent, a malformed
 /// magnet), unlike a network-level failure. A distinct type so callers can
 /// `downcast_ref` and treat it differently from a transient error: retrying
@@ -41,13 +41,13 @@ struct AddTorrentResponse {
     #[serde(default)]
     failure_count: u32,
     /// Present when adding by URL rather than by a magnet/`.torrent` blob
-    /// qBittorrent already has in hand — the torrent itself is fetched
+    /// qBittorrent already has in hand: the torrent itself is fetched
     /// asynchronously, so the immediate response has neither succeeded nor
     /// failed yet, just queued. nyaa's RSS feed always hands over a
     /// `.torrent` download URL (never a magnet), so this is the normal
     /// shape for every anime grab, not an edge case. Verified live against
     /// the deployed qBittorrent: a URL add returns HTTP 202 with
-    /// `{"pending_count":1,"success_count":0,"failure_count":0}` — treating
+    /// `{"pending_count":1,"success_count":0,"failure_count":0}`: treating
     /// `success_count == 0` alone as rejection (the previous check) silently
     /// dropped every one of these while the torrent downloaded successfully
     /// in the background, with no DB record and no log line.
@@ -55,18 +55,18 @@ struct AddTorrentResponse {
     pending_count: u32,
 }
 
-/// Interprets a `torrents/add` response body — split out from `add_magnet`
+/// Interprets a `torrents/add` response body: split out from `add_magnet`
 /// so it's directly testable without a live qBittorrent server.
 /// qBittorrent's add-torrent endpoint returns HTTP 200/202 even when it
 /// rejects the magnet outright (a dead/malformed hash, one it already knows
-/// is unreachable) — the response body is the only signal. Older
+/// is unreachable); the response body is the only signal. Older
 /// qBittorrent versions returned plain text ("Ok." vs "Fails."); newer ones
 /// return a JSON summary with success_count/failure_count/pending_count
 /// instead (verified live against the currently deployed version). Without
 /// checking whichever shape is actually in play, a rejected magnet looks
 /// identical to a real success: the caller records a `release` row as
 /// grabbed and nothing ever downloads, silently and permanently (verified
-/// live — this happened for a real release under the old text-only check,
+/// live: this happened for a real release under the old text-only check,
 /// and separately for every nyaa URL-add under a since-fixed
 /// `success_count == 0` check that didn't account for `pending_count`).
 fn add_torrent_response_is_rejected(body: &str) -> bool {
@@ -86,14 +86,14 @@ pub struct QbitClient {
     /// restarted.
     credentials: tokio::sync::RwLock<Option<(String, String)>>,
     /// Serializes the add-then-correlate-hash sequence (see
-    /// `scheduler::grab_and_capture_hash`) across every caller — the
+    /// `scheduler::grab_and_capture_hash`) across every caller: the
     /// background grab loop and the API's review-approve handler both add
     /// torrents against the same category and can run concurrently.
     /// Without this, two adds interleaved between one caller's before/after
     /// `torrents/info` snapshots let the *other* caller's torrent look like
     /// "the new one," recording the wrong hash against the wrong release
     /// (verified as a real risk, not just theoretical, during the Fable 5
-    /// audit — see the caller for the fuller writeup).
+    /// audit; see the caller for the fuller writeup).
     grab_lock: tokio::sync::Mutex<()>,
 }
 
@@ -104,10 +104,10 @@ pub struct TorrentInfo {
     pub state: String,
     pub progress: f64,
     // Not read internally today, but kept to mirror qBittorrent's actual API
-    // shape 1:1 — useful in `{:?}` debug logging and cheap to keep in sync.
+    // shape 1:1: useful in `{:?}` debug logging and cheap to keep in sync.
     #[allow(dead_code)]
     pub save_path: String,
-    /// Full path to the torrent's content (file or directory root) —
+    /// Full path to the torrent's content (file or directory root):
     /// qBittorrent resolves this for us, so importers don't need to guess
     /// at how save_path and name combine for a given torrent.
     pub content_path: String,
@@ -115,7 +115,7 @@ pub struct TorrentInfo {
 
 impl QbitClient {
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
-        // No total timeout is reqwest's default — the background loop holds
+        // No total timeout is reqwest's default; the background loop holds
         // the DB mutex across calls into this client, so a stalled
         // connection would hang the whole daemon.
         let client = reqwest::Client::builder()
@@ -150,7 +150,7 @@ impl QbitClient {
         // Older qBittorrent WebUI API versions return 200 with body "Ok.";
         // newer ones return 204 No Content with an empty body instead. Bad
         // credentials return a real error status (401), which `is_success`
-        // already catches — the response body's exact text isn't part of
+        // already catches; the response body's exact text isn't part of
         // the actual success contract, just an artifact of the old version.
         if !status.is_success() {
             bail!("qbit login failed: status={status} body={body:?}");
@@ -223,7 +223,7 @@ impl QbitClient {
 
     /// Sends a POST form request, retrying once after a silent re-login if
     /// the session had expired (403). Shared by the file-relocation methods
-    /// below — `add_magnet`/`list_torrents` predate this and are left as
+    /// below; `add_magnet`/`list_torrents` predate this and are left as
     /// they are rather than churned for the sake of it.
     async fn post_form(&self, path: &str, form: &[(&str, &str)]) -> Result<String> {
         for attempt in 0..2 {
@@ -247,7 +247,7 @@ impl QbitClient {
         unreachable!("loop always returns or bails on its second iteration")
     }
 
-    /// Held for the duration of an add-then-correlate-hash sequence — see
+    /// Held for the duration of an add-then-correlate-hash sequence; see
     /// `grab_lock`'s doc comment on why this needs to be process-wide, not
     /// just per-call.
     pub(crate) async fn lock_for_grab(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -255,7 +255,7 @@ impl QbitClient {
     }
 
     /// Removes a torrent from qBittorrent's own tracking after breadarr has
-    /// already moved its data straight into the library — `delete_files:
+    /// already moved its data straight into the library; `delete_files:
     /// false` because by the time this is called there's nothing left at
     /// the torrent's original save path for qBittorrent to delete; leaving
     /// the torrent registered would just leave it sitting in an "files
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn a_pending_url_add_is_not_treated_as_rejected() {
         // Exact shape qBittorrent 5.x returns for a URL add (every nyaa
-        // grab) — the torrent is queued for an async fetch, not yet
+        // grab): the torrent is queued for an async fetch, not yet
         // succeeded or failed. This is the shape that used to be
         // misread as an outright rejection.
         let body = r#"{"added_torrent_ids":[],"failure_count":0,"pending_count":1,"success_count":0}"#;

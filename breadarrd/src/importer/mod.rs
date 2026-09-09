@@ -21,7 +21,7 @@ pub(crate) const VIDEO_EXTS: &[&str] = &["mkv", "mp4", "avi", "mov"];
 /// stays a constant rather than a config knob.
 ///
 /// **Both** width and height must be below their own floor before a file
-/// is flagged — height alone isn't a valid "1080p or not" test, since a
+/// is flagged: height alone isn't a valid "1080p or not" test, since a
 /// wider-than-16:9 master (2.00:1 is common for prestige/streaming shows;
 /// e.g. Apple TV+'s "For All Mankind" ships at 1920x960) legitimately has
 /// full 1920px width with height well under 1080 purely from the aspect
@@ -54,7 +54,7 @@ enum PendingGrab {
         root_folder: String,
     },
     /// A season-pack/batch torrent: one release row, but potentially many
-    /// files inside mapping to many episodes — see `import_season_pack`.
+    /// files inside mapping to many episodes; see `import_season_pack`.
     /// `episode_id` stays absent on the release row (`season_number`
     /// disambiguates instead, same convention as everywhere else this
     /// column is used).
@@ -104,7 +104,7 @@ impl PendingGrab {
 /// Three separate queries (rather than one `LEFT JOIN episode`) because a
 /// movie/season-pack release's `episode_id` is NULL, which would otherwise
 /// force every episode-only column to be handled as `Option` for no
-/// benefit — matches the movie/episode split already used elsewhere
+/// benefit: matches the movie/episode split already used elsewhere
 /// (`process_item`, `enumerate_search_targets`).
 fn fetch_pending_grabs(conn: &Connection) -> Result<Vec<PendingGrab>> {
     let mut out = Vec::new();
@@ -203,8 +203,8 @@ pub(crate) fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
         let path = entry?.path();
         // `path.is_dir()` follows symlinks, which would let a planted
         // directory link walk the importer (and library-scan) out of the
-        // download/library root. Skip every symlink — file links to videos
-        // included — and only recurse into real directories.
+        // download/library root. Skip every symlink: file links to videos
+        // included, and only recurse into real directories.
         let ft = std::fs::symlink_metadata(&path)?.file_type();
         if ft.is_symlink() {
             continue;
@@ -220,7 +220,7 @@ pub(crate) fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// TV episode files live under a `Season NN` subfolder of the show's
 /// `root_folder`, matching the layout Jellyfin/Sonarr/library-scan already
-/// use — episodes imported flat into the show root previously left new
+/// use: episodes imported flat into the show root previously left new
 /// grabs sitting alongside, rather than inside, the season structure that
 /// pre-existing library files were organized into.
 pub(crate) fn season_dir(root_folder: &str, season_number: u32) -> PathBuf {
@@ -230,7 +230,7 @@ pub(crate) fn season_dir(root_folder: &str, season_number: u32) -> PathBuf {
 /// TVDB stores some shows' episode titles only in their original-airing
 /// language (verified live: entire seasons of otherwise-English-titled
 /// shows came back with Japanese-only episode titles, no English fallback
-/// available from the API at all) — using that title verbatim in a
+/// available from the API at all); using that title verbatim in a
 /// generated filename buries a CJK title inside an otherwise-Latin-script
 /// library, which nothing downstream (search, external tools, a user
 /// scanning a directory listing) can actually read. Better to just omit the
@@ -283,7 +283,7 @@ pub(crate) fn sanitize(s: &str) -> String {
         .collect();
     // After the replacements above, a title of `.` or `..` is still a
     // hostile path component (`root_folder/../file`). Slash-containing
-    // titles become `foo_.._bar`, which is fine — only a lone `.`/`..`
+    // titles become `foo_.._bar`, which is fine: only a lone `.`/`..`
     // can climb.
     if cleaned == "." || cleaned == ".." {
         "_".to_string()
@@ -293,7 +293,7 @@ pub(crate) fn sanitize(s: &str) -> String {
 }
 
 /// True when there isn't enough free space at `dir` to hold `needed_bytes`.
-/// Checked before every import — a library volume running out of space is a
+/// Checked before every import: a library volume running out of space is a
 /// real failure mode, and a plain `copy` with no such guard leaves an ENOSPC
 /// partway through as a truncated file sitting at the final destination
 /// path. `blocks_available` (rather than `blocks_free`) matches what `df`
@@ -311,13 +311,13 @@ fn insufficient_space(dir: &Path, needed_bytes: u64) -> Result<bool> {
 /// `rename` first, which needs essentially zero additional space, so
 /// checking `dest`'s free space against the *full* source file size is a
 /// false positive whenever downloads and the library share a volume (a
-/// common setup) — a real production shape found in review: a season-pack
+/// common setup); a real production shape found in review: a season-pack
 /// file that would `rename` instantly got rejected as "not enough free
 /// space", retried and failed identically every cycle
 /// (`MAX_IMPORT_ERRORS`), then got released back to the search pool where
 /// it was re-grabbed and failed the same way again, forever. Erring toward
 /// `false` (i.e. still running the space check) on a stat failure is the
-/// safe direction — it only means checking a space guarantee that wasn't
+/// safe direction: it only means checking a space guarantee that wasn't
 /// strictly needed, never skipping one that was.
 fn same_filesystem(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -329,8 +329,8 @@ fn same_filesystem(a: &Path, b: &Path) -> bool {
 
 /// Moves `src` into `dest`: a same-filesystem `rename` where possible
 /// (instant, atomic, no extra disk usage), falling back to copy-then-delete
-/// across a filesystem boundary. Nothing is left behind at `src` either way
-/// — there used to be a deliberate hardlink-and-leave-`src`-alone scheme
+/// across a filesystem boundary. Nothing is left behind at `src` either way:
+/// there used to be a deliberate hardlink-and-leave-`src`-alone scheme
 /// here so qBittorrent could keep seeding the original download after
 /// import, but with nothing seeding after download completes anymore, that
 /// complexity (a same-filesystem staging relocate before every import, so
@@ -340,7 +340,7 @@ fn same_filesystem(a: &Path, b: &Path) -> bool {
 ///
 /// The copy fallback writes to a `.part` sibling of `dest` and only renames
 /// it into place once the copy is complete (a same-filesystem rename, so
-/// atomic) — a crash mid-copy leaves an orphaned `.part` file rather than a
+/// atomic): a crash mid-copy leaves an orphaned `.part` file rather than a
 /// truncated file at `dest`, so a retried import can't ever double-count a
 /// half-written file as already present. `src` is only removed once that
 /// copy is confirmed in place, so a crash between the copy and the removal
@@ -366,7 +366,7 @@ fn is_video_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Lexical `..`/`.` collapse without touching the filesystem — used when
+/// Lexical `..`/`.` collapse without touching the filesystem: used when
 /// `canonicalize` can't (path missing) and by `remap_path` before the
 /// joined result is allowed to escape `host_prefix`.
 fn normalize_lexically(path: &Path) -> PathBuf {
@@ -470,18 +470,18 @@ fn remove_non_video_files(dir: &Path) -> Result<()> {
 }
 
 /// Removes whatever's left of a torrent's download folder once every file
-/// breadarr cares about has already been moved out of it — split out from
+/// breadarr cares about has already been moved out of it: split out from
 /// `run_import_cycle` so it's directly testable without a real qBittorrent
 /// server. `move_or_copy_file` only ever relocates the one video file it
 /// located; a multi-file release's own folder (sample clips, `.nfo`/`.srt`/
 /// `.jpg` sidecars) is otherwise left behind forever, since nothing else
 /// ever points at it once the torrent itself is gone from qBittorrent. A
-/// bare file (a release with no wrapping folder) needs no cleanup here —
+/// bare file (a release with no wrapping folder) needs no cleanup here:
 /// `move_or_copy_file` already consumed it.
 ///
 /// Never wipes a directory that still contains a video we didn't import
 /// (unmatched pack files), and never `remove_dir_all`s the downloads root
-/// itself — `host_downloads_path` defaults to `""`, so a raw `!= host`
+/// itself: `host_downloads_path` defaults to `""`, so a raw `!= host`
 /// comparison is not enough.
 fn cleanup_leftover_download_dir(content_path: &Path, host_downloads_path: &str) -> Result<()> {
     if !is_safe_cleanup_target(content_path, host_downloads_path) {
@@ -520,7 +520,7 @@ pub struct ImportStats {
     pub failed: usize,
     /// Freshly-imported files where the post-import ffprobe found a
     /// ground-truth problem the title text didn't reveal (under-quality
-    /// despite a claimed-good resolution, or unreadable) — see
+    /// despite a claimed-good resolution, or unreadable); see
     /// `probe_indicates_import_problem`.
     pub quality_flagged: usize,
 }
@@ -536,7 +536,7 @@ const STALL_THRESHOLD_HOURS: f64 = 72.0;
 const MISSING_GRACE_MINUTES: f64 = 15.0;
 
 /// Advances the release's progress watermark, but only when progress has
-/// genuinely increased — `last_progress_at` staying still while progress
+/// genuinely increased: `last_progress_at` staying still while progress
 /// stays still is exactly the signal `grab_is_stalled` looks for.
 fn update_grab_progress(conn: &Connection, release_id: i64, progress: f64) -> Result<()> {
     let prev: Option<f64> = conn.query_row(
@@ -568,7 +568,7 @@ fn grab_is_stalled(conn: &Connection, release_id: i64) -> Result<bool> {
 }
 
 /// True once a grabbed release's torrent hash has been missing from qBit's
-/// torrent list for longer than a short grace period — long enough to rule
+/// torrent list for longer than a short grace period: long enough to rule
 /// out qBit simply not having indexed a just-added torrent yet, short
 /// enough that a torrent genuinely removed by hand doesn't block re-search
 /// for days.
@@ -608,7 +608,7 @@ fn record_import_error(conn: &Connection, release_id: i64) -> Result<i64> {
 /// Marks a stalled or missing grab as failed. `'failed'` isn't in the
 /// `('grabbed','downloading')` in-flight check used by
 /// `enumerate_search_targets`/`movie_needs_grab`, so the episode or movie
-/// becomes searchable again on the very next cycle — this is the fallback-
+/// becomes searchable again on the very next cycle: this is the fallback-
 /// into-the-search-pool step, not just bookkeeping.
 fn fail_grab(conn: &Connection, grab: &PendingGrab, reason: &str) -> Result<()> {
     conn.execute(
@@ -635,14 +635,14 @@ fn fail_grab(conn: &Connection, grab: &PendingGrab, reason: &str) -> Result<()> 
 #[derive(Debug, Default, PartialEq)]
 pub struct ReconcileOutcome {
     /// Rows whose file had simply moved (e.g. a show folder renamed since
-    /// the row was written) — found by basename under the owning
+    /// the row was written): found by basename under the owning
     /// `root_folder` and repaired in place rather than cleared.
     pub repaired: usize,
     /// Rows genuinely gone: not at their stored path, and no file with the
     /// same name found anywhere under `root_folder` either.
     pub cleared: usize,
     /// True when the pass found more "genuinely gone" candidates than
-    /// `RECONCILE_MAX_CLEAR_FRACTION` allows and refused to clear anything —
+    /// `RECONCILE_MAX_CLEAR_FRACTION` allows and refused to clear anything:
     /// see its doc comment for why.
     pub aborted: bool,
 }
@@ -650,7 +650,7 @@ pub struct ReconcileOutcome {
 /// Refuse to clear more than this fraction of all tracked files in a single
 /// pass. A healthy library loses files one or two at a time; a mount going
 /// offline, a bulk rename that outpaces the basename-repair fallback below,
-/// or a bug can instead make *every* row look gone at once — exactly the
+/// or a bug can instead make *every* row look gone at once: exactly the
 /// shape of failure that isn't self-evident from any single row, only from
 /// the batch as a whole.
 const RECONCILE_MAX_CLEAR_FRACTION: f64 = 0.10;
@@ -660,16 +660,16 @@ const RECONCILE_MAX_CLEAR_FRACTION: f64 = 0.10;
 const RECONCILE_MIN_CLEAR_FLOOR: usize = 10;
 
 /// Clears `episode_file`/`has_file` state for files that no longer exist on
-/// disk — a file deleted or moved by hand outside breadarr (or Jellyfin's
+/// disk: a file deleted or moved by hand outside breadarr (or Jellyfin's
 /// own library tools) previously left stale state forever: the episode
 /// looked permanently satisfied and never got re-searched, no matter how
 /// long the file had actually been gone. Runs on a slow, separate ticker
-/// (disk state doesn't change on its own) — see `main.rs`.
+/// (disk state doesn't change on its own); see `main.rs`.
 ///
 /// Before treating a missing path as "gone," this looks for a file of the
 /// same name (or, failing that, the same stem under a different video
-/// extension — see `find_by_stem`) anywhere under the owning media item's
-/// `root_folder` and repairs the stored path instead — the DB `path` column
+/// extension; see `find_by_stem`) anywhere under the owning media item's
+/// `root_folder` and repairs the stored path instead: the DB `path` column
 /// is only ever written once, on import, so anything that changes a file's
 /// location or name afterward (the library-normalization scan appending a
 /// year to a show folder; Tdarr re-encoding a file to a different container
@@ -678,13 +678,13 @@ const RECONCILE_MIN_CLEAR_FLOOR: usize = 10;
 /// against a transient mount outage (`root_folder` itself absent) being
 /// misread as every file under it having vanished.
 ///
-/// `dry_run` computes and logs what would happen without writing anything —
+/// `dry_run` computes and logs what would happen without writing anything:
 /// used for a one-time report against a freshly-restored database before
 /// trusting this to run unattended again.
 pub fn reconcile_missing_files(conn: &Connection, dry_run: bool) -> Result<ReconcileOutcome> {
     // `episode_file.media_item_id` is NULL for TV rows written by the
     // library scan (only `episode_id` is set there) and `episode_id` is
-    // NULL for movie rows — resolving the owning `root_folder` needs both
+    // NULL for movie rows: resolving the owning `root_folder` needs both
     // joins, COALESCEd, or half the library silently skips repair.
     let mut stmt = conn.prepare(
         "SELECT ef.id, ef.episode_id, ef.path,
@@ -717,7 +717,7 @@ pub fn reconcile_missing_files(conn: &Connection, dry_run: bool) -> Result<Recon
             continue;
         };
         if !Path::new(&root_folder).is_dir() {
-            // The whole show/movie folder is absent — almost certainly a
+            // The whole show/movie folder is absent: almost certainly a
             // mount that isn't up yet, not hundreds of individually deleted
             // files. Never clear on this basis.
             tracing::warn!(
@@ -733,8 +733,8 @@ pub fn reconcile_missing_files(conn: &Connection, dry_run: bool) -> Result<Recon
             .and_then(|name| find_by_basename(Path::new(&root_folder), name))
             .or_else(|| {
                 // Tdarr (this library's AV1-transcode pipeline) re-encodes a
-                // file in place and can land it under a different extension
-                // — same stem, e.g. `Upgrade (2018).mp4` becomes `Upgrade
+                // file in place and can land it under a different extension:
+                // same stem, e.g. `Upgrade (2018).mp4` becomes `Upgrade
                 // (2018).mkv`, with the original removed. An exact basename
                 // match won't see that; falling back to a stem match against
                 // known video extensions catches it exactly like a folder
@@ -757,7 +757,7 @@ pub fn reconcile_missing_files(conn: &Connection, dry_run: bool) -> Result<Recon
             would_repair = to_repair.len(),
             total,
             clear_limit,
-            "reconcile wanted to clear an anomalous number of files in one pass — refusing \
+            "reconcile wanted to clear an anomalous number of files in one pass: refusing \
              (a mount may be offline, or something changed how paths are laid out). \
              No rows were changed."
         );
@@ -816,7 +816,7 @@ pub fn reconcile_missing_files(conn: &Connection, dry_run: bool) -> Result<Recon
 }
 
 /// First file found at any depth under `root` whose file name is exactly
-/// `name` — used to relocate an `episode_file` row whose stored path no
+/// `name`: used to relocate an `episode_file` row whose stored path no
 /// longer exists but whose owning show/movie folder does, e.g. after the
 /// folder itself was renamed. Bounded to one media item's own folder (a
 /// handful of season directories at most), and safe from cross-show
@@ -837,7 +837,7 @@ fn find_by_basename(root: &Path, name: &std::ffi::OsStr) -> Option<PathBuf> {
 }
 
 /// First file found at any depth under `root` with the given file stem
-/// (name minus extension) and a recognized video extension — the
+/// (name minus extension) and a recognized video extension: the
 /// transcode-in-place counterpart to `find_by_basename`: a re-encode can
 /// change the container/extension (e.g. Tdarr converting `.mp4` to `.mkv`)
 /// while keeping the stem, which an exact-name match won't see.
@@ -862,9 +862,9 @@ fn find_by_stem(root: &Path, stem: &std::ffi::OsStr) -> Option<PathBuf> {
     None
 }
 
-/// One TV episode whose file already sits on disk — matching breadarr's own
+/// One TV episode whose file already sits on disk: matching breadarr's own
 /// `"S{season:02}E{episode:02}"` naming marker, in exactly the season
-/// directory this episode's own metadata says it should be in — despite
+/// directory this episode's own metadata says it should be in, despite
 /// having no `episode_file` row at all. `has_file = 0` lies about it, so
 /// the missing-content search loop treats it as genuinely absent and keeps
 /// trying to (re)download something already there.
@@ -878,12 +878,12 @@ pub struct RelinkCandidate {
     pub path: PathBuf,
 }
 
-/// Every video file found at any depth under `root` — deliberately
+/// Every video file found at any depth under `root`: deliberately
 /// unbounded by a fixed season-folder shape, since a real production audit
 /// found layouts varying wildly per show: a plain `Season N`/`Season 0N`
 /// directly under the show root in most cases, but at least one show (a
-/// BluRay box-set release) nests an extra layer — the whole release's own
-/// folder name — between the show root and its `Season N` directories.
+/// BluRay box-set release) nests an extra layer: the whole release's own
+/// folder name, between the show root and its `Season N` directories.
 /// Bounded to one show's own folder (a handful of seasons deep at most),
 /// same scope as `find_by_basename`/`find_by_stem`.
 fn collect_video_files(root: &Path) -> Vec<PathBuf> {
@@ -910,7 +910,7 @@ fn collect_video_files(root: &Path) -> Vec<PathBuf> {
 /// one video file matching its own `"S{season:02}E{episode:02}"` naming
 /// marker (breadarr's own convention, which the vast majority of
 /// scene/fansub releases also happen to embed verbatim even under otherwise
-/// raw filenames) — found via a real production audit: several shows had
+/// raw filenames); found via a real production audit: several shows had
 /// `episode`/`media_item` rows (almost certainly rebuilt by an earlier
 /// DB-recovery incident) with no matching `episode_file` row, even though
 /// the actual video files were never touched and still sat right where they
@@ -918,18 +918,18 @@ fn collect_video_files(root: &Path) -> Vec<PathBuf> {
 /// N`, or an extra nested release-folder level) that a check scoped only to
 /// `season_dir`'s exact zero-padded shape would never find. Walks the whole
 /// show folder once and reuses that listing for every missing episode in
-/// it, rather than re-walking per episode. Purely a finder — see
+/// it, rather than re-walking per episode. Purely a finder; see
 /// `relink_episode_files` for the (additive-only) part that actually links
 /// anything in.
 ///
 /// Deliberately conservative in both directions: a show folder with *zero*
 /// marker matches for an episode is left alone (genuinely missing, nothing
-/// to relink here — `reconcile_missing_files`/the normal search loop are the
+/// to relink here: `reconcile_missing_files`/the normal search loop are the
 /// right tools for an actually-absent file), and *more than one* match is
 /// left alone too rather than guessed at, returned separately so a human
 /// can look instead of silently picking one. A show using pure absolute
 /// numbering with no season/episode marker at all in its filenames (a real
-/// pattern found on some anime releases) simply never matches either way —
+/// pattern found on some anime releases) simply never matches either way:
 /// the safe failure mode, not a wrong guess.
 pub fn find_relinkable_episode_files(
     conn: &Connection,
@@ -989,8 +989,8 @@ pub fn find_relinkable_episode_files(
 }
 
 /// Links each `RelinkCandidate` into `episode_file` (probing it first, same
-/// as a real import) and marks its episode `has_file = 1`. Purely additive
-/// — never moves, renames, or deletes anything on disk, since the file was
+/// as a real import) and marks its episode `has_file = 1`. Purely additive:
+/// never moves, renames, or deletes anything on disk, since the file was
 /// already exactly where a real import would have put it; this only makes
 /// breadarr's own bookkeeping admit what's already true.
 pub fn relink_episode_files(conn: &Connection, candidates: &[RelinkCandidate]) -> Result<usize> {
@@ -1013,16 +1013,16 @@ pub fn relink_episode_files(conn: &Connection, candidates: &[RelinkCandidate]) -
 }
 
 /// Runs ffprobe on `path` and upserts the result into `media_file_probe`
-/// against `episode_file_id` — but only if the file's size or mtime has
+/// against `episode_file_id`, but only if the file's size or mtime has
 /// actually changed since the last probe, so a routine sweep over a large,
 /// mostly-unchanged library is cheap after the first pass. This is also
 /// what keeps a probe from silently describing stale content after
 /// `reconcile_missing_files` repairs a renamed/transcoded file onto the
-/// same `episode_file.id` — the freshness check catches the change and
+/// same `episode_file.id`: the freshness check catches the change and
 /// forces a re-probe. Returns `true` if a probe actually ran, `false` if
 /// skipped as already up to date. ffprobe itself failing (missing binary,
 /// unreadable/corrupt file) is recorded as `corruption_status =
-/// 'probe_failed'` rather than propagated — probing must never abort a
+/// 'probe_failed'` rather than propagated: probing must never abort a
 /// scan or import.
 pub fn ensure_probed(conn: &Connection, episode_file_id: i64, path: &Path) -> Result<bool> {
     let metadata = std::fs::metadata(path)
@@ -1063,7 +1063,7 @@ pub fn ensure_probed(conn: &Connection, episode_file_id: i64, path: &Path) -> Re
 
 #[allow(clippy::too_many_arguments)]
 /// Everything `upsert_probe` needs derived from a `MediaProbe` (or blanked
-/// out entirely when probing itself failed) — a struct rather than the
+/// out entirely when probing itself failed); a struct rather than the
 /// wall-of-positional-`Option`s this used to be, since that stopped being
 /// readable once the extra-metadata fields were added.
 #[derive(Default)]
@@ -1235,7 +1235,7 @@ pub fn record_decode_check(
 }
 
 /// True when a just-probed file has a problem worth alerting on
-/// immediately (used for the post-import ground-truth quality check) —
+/// immediately (used for the post-import ground-truth quality check):
 /// deliberately narrower than "any flag is set": `flag_no_subtitles` and
 /// `flag_non_english_default_audio` are common and already handled
 /// elsewhere (the latter is fixed automatically by the remux-at-import step
@@ -1262,19 +1262,19 @@ pub struct ProbeSweepReport {
 }
 
 /// Incremental sweep over every tracked file: probes anything not probed
-/// yet, or whose content has drifted (size/mtime) since it last was — the
+/// yet, or whose content has drifted (size/mtime) since it last was: the
 /// backlog-and-drift half of keeping `media_file_probe` current, alongside
 /// the inline probing done right after a file is linked or imported. Files
 /// missing from disk are left alone (that's `reconcile_missing_files`'s
 /// job, not this one's) rather than double-handled here.
 /// Caps how many files actually get *probed* (not just checked-and-skipped)
 /// in one `probe_library` call. Skipping this check runs an unbounded first
-/// sweep against a large existing library in a single pass — each probe
+/// sweep against a large existing library in a single pass: each probe
 /// spawns a real `ffprobe` subprocess, and the whole call holds the shared
 /// `Connection` mutex the entire time (the same mutex `main.rs`'s grab/
 /// import/search tickers need), so an unbounded sweep would stall those
 /// cycles for however long a full library backlog takes. Capping it instead
-/// spreads a large backlog across successive hourly ticks — see
+/// spreads a large backlog across successive hourly ticks; see
 /// `main.rs`'s reconcile ticker, which this shares a tick with.
 const PROBE_SWEEP_BATCH_LIMIT: usize = 200;
 
@@ -1315,12 +1315,12 @@ pub struct VerifyLibraryReport {
 /// Runs the expensive full-decode corruption check
 /// (`ffprobe::verify_decodable`) against every file whose cheap header
 /// probe succeeded but hasn't yet been decode-verified
-/// (`corruption_status = 'probe_ok'`) — confirming a file actually decodes
+/// (`corruption_status = 'probe_ok'`): confirming a file actually decodes
 /// end-to-end, not just that its container header parses. `probe_failed`
 /// files are skipped: ffprobe already couldn't parse them, so a decode
 /// attempt would only confirm the same failure at much higher cost.
-/// Deliberately never run by any ticker (this can take minutes per file —
-/// see `ffprobe::verify_decodable`'s doc comment) — only ever runs when
+/// Deliberately never run by any ticker (this can take minutes per file;
+/// see `ffprobe::verify_decodable`'s doc comment): only ever runs when
 /// explicitly invoked via `breadarrd verify-library`.
 pub fn verify_library(conn: &Connection) -> Result<VerifyLibraryReport> {
     let mut stmt = conn.prepare(
@@ -1377,13 +1377,13 @@ pub struct RemuxBacklogReport {
 /// Applies the same "promote the English audio track to default" fix
 /// (`mkv::remux_english_default`) that already runs automatically right
 /// after a fresh download, but against files *already* sitting in the
-/// library — the backlog that existed before this feature shipped, or any
+/// library: the backlog that existed before this feature shipped, or any
 /// file `media_file_probe` has flagged since. Deliberately not wired to any
 /// automatic ticker (unlike `probe_library`, which is read-mostly): this
 /// rewrites real files in the library, so it only ever runs when explicitly
 /// invoked (see `breadarrd remux-backlog`).
 ///
-/// Only `.mkv` files are eligible — `mkv::remux_english_default` retags
+/// Only `.mkv` files are eligible: `mkv::remux_english_default` retags
 /// tracks via `mkvmerge`, the same constraint the at-import-time fix
 /// already has.
 pub fn remux_backlog(conn: &Connection) -> Result<RemuxBacklogReport> {
@@ -1424,7 +1424,7 @@ pub fn remux_backlog(conn: &Connection) -> Result<RemuxBacklogReport> {
 }
 
 /// Returns `true` if a remux actually happened, `false` if there was no
-/// English track to promote (nothing to do — not an error).
+/// English track to promote (nothing to do, not an error).
 fn remux_one_backlog_file(conn: &Connection, episode_file_id: i64, path: &Path) -> Result<bool> {
     let tracks = mkv::inspect_audio_tracks(path)?;
     if !mkv::has_english_track(&tracks) {
@@ -1454,7 +1454,7 @@ fn remux_one_backlog_file(conn: &Connection, episode_file_id: i64, path: &Path) 
         "UPDATE episode_file SET size_bytes = ?1 WHERE id = ?2",
         params![size_bytes, episode_file_id],
     )?;
-    // Force a re-probe even though size may coincidentally match — a
+    // Force a re-probe even though size may coincidentally match: a
     // flag-only remux barely changes file size, so the freshness check
     // could otherwise skip it. Clearing the stored probe row is simpler
     // than adding a "force" parameter to `ensure_probed` for this one caller.
@@ -1468,7 +1468,7 @@ fn remux_one_backlog_file(conn: &Connection, episode_file_id: i64, path: &Path) 
 }
 
 /// Translates a path qBittorrent reports via its API into one breadarr can
-/// actually open — needed when qBittorrent runs in a container (its own
+/// actually open: needed when qBittorrent runs in a container (its own
 /// downloads mounted at some internal prefix like "/downloads") while
 /// breadarr runs natively on the same host. A no-op when either prefix is
 /// empty (qBittorrent's reported path is used as-is).
@@ -1524,8 +1524,8 @@ pub async fn run_import_cycle(
     )?;
 
     // The file(s) are already gone from qBittorrent's download directory by
-    // this point — moved into the library, or deleted outright because a
-    // better file already existed — no seeding to preserve either way, so
+    // this point: moved into the library, or deleted outright because a
+    // better file already existed. No seeding to preserve either way, so
     // the torrent itself is just forgotten rather than left sitting around
     // in a "files missing" error state. Best-effort: a failed delete here
     // never undoes or blocks the import that already succeeded.
@@ -1545,7 +1545,7 @@ pub async fn run_import_cycle(
 
     // Best-effort, same reasoning as the `delete_torrent` cleanup just
     // above: by this point files have already been moved, DB rows written,
-    // and torrents removed from qBittorrent — a real import that already
+    // and torrents removed from qBittorrent: a real import that already
     // succeeded. Propagating a Jellyfin 500/timeout here used to discard
     // `stats` entirely and report the whole cycle as failed, which also
     // skipped `stats.failed`/`stats.quality_flagged` notifications for
@@ -1563,7 +1563,7 @@ pub async fn run_import_cycle(
 }
 
 /// The actual hash-matching, progress-gating, stall/missing-detection, and
-/// import decision logic — split out from `run_import_cycle` so it's
+/// import decision logic: split out from `run_import_cycle` so it's
 /// testable against a synthetic `&[TorrentInfo]` instead of requiring a
 /// real qBittorrent server. `run_import_cycle`'s only other job is the one
 /// network call (`list_torrents`) and the post-import Jellyfin refresh,
@@ -1579,7 +1579,7 @@ fn process_pending_grabs(
     transcode_cfg: Option<&breadarr_shared::config::TranscodeConfig>,
 ) -> Result<(ImportStats, Vec<(String, PathBuf)>)> {
     let mut stats = ImportStats::default();
-    // Torrents whose data has been fully dealt with this cycle — imported,
+    // Torrents whose data has been fully dealt with this cycle: imported,
     // skipped as already-better, or given up on (stall / missing past grace
     // / MAX_IMPORT_ERRORS). The caller (`run_import_cycle`) removes each
     // from qBittorrent afterward and runs leftover-dir cleanup, which now
@@ -1621,7 +1621,7 @@ fn process_pending_grabs(
         }
         if torrent.state == "moving" {
             // A category/save-path change (e.g. a manual move in the
-            // qBittorrent UI) is still physically in flight — `content_path`
+            // qBittorrent UI) is still physically in flight: `content_path`
             // may already point at the new location while the actual bytes
             // are still being copied there. Importing now risks moving a
             // partially-relocated (truncated) file into the library and
@@ -1706,8 +1706,8 @@ fn process_pending_grabs(
                 imported_hashes.push((grab.torrent_hash().to_string(), content_path.clone()));
             }
             Ok(ImportOutcome::SkippedAlreadyHaveBetter) => {
-                // The download's data is already handled — `import_one`
-                // deleted the losing file itself — so there's nothing left
+                // The download's data is already handled: `import_one`
+                // deleted the losing file itself, so there's nothing left
                 // for qBittorrent to track either.
                 imported_hashes.push((grab.torrent_hash().to_string(), content_path.clone()));
             }
@@ -1738,7 +1738,7 @@ fn process_pending_grabs(
 }
 
 /// What actually happened when `import_one` was asked to import a
-/// completed torrent — distinct from an error, `SkippedAlreadyHaveBetter`
+/// completed torrent: distinct from an error, `SkippedAlreadyHaveBetter`
 /// is a deliberate no-op (see `import_one`'s dest-collision check), not a
 /// failure, so callers shouldn't count it toward `ImportStats::imported`.
 enum ImportOutcome {
@@ -1750,12 +1750,12 @@ enum ImportOutcome {
 }
 
 /// Shared by every place a freshly-imported file becomes eligible for the
-/// async transcode queue (`import_one`, season-pack import) — reads the
+/// async transcode queue (`import_one`, season-pack import): reads the
 /// probe data `ensure_probed` just wrote, delegates the codec/HDR/height
-/// eligibility call to `transcode::should_enqueue`, and — if eligible —
+/// eligibility call to `transcode::should_enqueue`, and, if eligible,
 /// decides the encode pipeline (`transcode::is_anime_content`, path-prefix
 /// first then metadata fallback) before enqueueing. Never propagates a
-/// failure into the caller's import result — same "never fail an
+/// failure into the caller's import result: same "never fail an
 /// otherwise-successful import" treatment as probing.
 fn maybe_enqueue_transcode(
     conn: &Connection,
@@ -1771,7 +1771,7 @@ fn maybe_enqueue_transcode(
         )
         .optional()?;
     let Some((video_codec, hdr, height, size_bytes)) = probe else {
-        // Probing itself failed (recorded as `probe_failed`) — nothing
+        // Probing itself failed (recorded as `probe_failed`); nothing
         // reliable to decide eligibility from yet; skip rather than guess.
         return Ok(());
     };
@@ -1790,7 +1790,7 @@ fn maybe_enqueue_transcode(
     Ok(())
 }
 
-/// A tracked file renamed aside to make room for an incoming upgrade —
+/// A tracked file renamed aside to make room for an incoming upgrade:
 /// `parked_at` may be empty (never actually renamed anything) when the
 /// tracked `episode_file` row's file was already missing from disk; `row_id`
 /// is `None` when this represents a stray untracked file at `dest` rather
@@ -1854,7 +1854,7 @@ fn import_one(
             remuxed = true;
         }
         // Anime-JP-fallback case (no English track at all, allowed through
-        // by the gate for anime) has nothing to fix — falls through to a
+        // by the gate for anime) has nothing to fix: falls through to a
         // clean import below, same as an already-English-default file.
     }
 
@@ -1902,7 +1902,7 @@ fn import_one(
     // `dest` right now. A real production bug found the hard way: a movie's
     // `root_folder` had drifted (recategorized between library folders)
     // after it was already imported, so its tracked `episode_file.path`
-    // no longer matched the *current* `dest` — `dest.exists()` came back
+    // no longer matched the *current* `dest`: `dest.exists()` came back
     // false, the whole comparison below was skipped entirely, and a fresh
     // grab imported right in alongside the untouched original, a real
     // duplicate neither this function nor the score comparison ever knew
@@ -1913,7 +1913,7 @@ fn import_one(
     // enforces a single `episode_file` per episode (the `library_health`
     // duplicate-groups report exists precisely because duplicates occur
     // here), and `query_row` would silently pick an arbitrary one of them,
-    // leaving any other duplicate's row and file untouched — orphaned
+    // leaving any other duplicate's row and file untouched: orphaned
     // pointing at a file this import may have just deleted (via the
     // `old_sibling`/`dest` overwrite below), or, worse, read as the *only*
     // existing file for the `upgrade_locked` check so a transcoded file's
@@ -1932,7 +1932,7 @@ fn import_one(
     // Trigger the comparison whenever *either* signal says something might
     // already be here: a tracked row (regardless of where its file actually
     // is), or a physical file already sitting at `dest` (a stray,
-    // not-yet-reconciled leftover with no tracked row at all — the case the
+    // not-yet-reconciled leftover with no tracked row at all: the case the
     // original `dest.exists()`-only check covered). Comparing on either
     // condition alone would miss the other's failure mode; comparing on
     // both is a strict superset of what the original single check did.
@@ -1941,7 +1941,7 @@ fn import_one(
         // Belt-and-suspenders: the missing-content/upgrade search paths
         // already refuse to re-grab an `upgrade_locked` file (it isn't
         // "missing" and the upgrade loop skips it), so this shouldn't be
-        // reachable for one today — but a locally AV1-transcoded file
+        // reachable for one today, but a locally AV1-transcoded file
         // should never be silently overwritten on score alone regardless
         // of which path produced the incoming grab, same guard as
         // `import_season_pack_file`'s matching check. Locked if *any*
@@ -1953,7 +1953,7 @@ fn import_one(
                 std::fs::remove_file(&working_path).ok();
             }
             // Nothing seeds this download anymore and it isn't going
-            // anywhere — the episode already has a file in place, so
+            // anywhere: the episode already has a file in place, so
             // there's no reason to leave a duplicate orphaned on disk.
             std::fs::remove_file(&source_path).ok();
             return Ok(ImportOutcome::SkippedAlreadyHaveBetter);
@@ -1981,7 +1981,7 @@ fn import_one(
                 grab.media_item_id(),
                 episode_id,
                 // event_history.event_type's CHECK constraint doesn't have
-                // an "upgraded" value (unlike release.status, which does) —
+                // an "upgraded" value (unlike release.status, which does):
                 // reusing "failed" here rather than a schema migration for
                 // one more enum value; the detail text carries the real
                 // reason.
@@ -1995,23 +1995,23 @@ fn import_one(
             if remuxed {
                 std::fs::remove_file(&working_path).ok();
             }
-            // Same reasoning as the upgrade_locked case above — this
+            // Same reasoning as the upgrade_locked case above: this
             // download lost the comparison and nothing seeds it, so it's
             // just wasted disk space if left in place.
             std::fs::remove_file(&source_path).ok();
             return Ok(ImportOutcome::SkippedAlreadyHaveBetter);
         }
         // The new file scores strictly better than what's currently there.
-        // Park aside whatever's actually here — the tracked row's real file
-        // (not necessarily `dest` — see above) and/or a stray file sitting
-        // at `dest` with no tracked row — rather than deleting anything
+        // Park aside whatever's actually here: the tracked row's real file
+        // (not necessarily `dest`; see above) and/or a stray file sitting
+        // at `dest` with no tracked row, rather than deleting anything
         // outright, so the replacement is placed and confirmed *before*
         // the original is actually given up. If the free-space check or
         // `move_or_copy_file` below then fails (I/O error, dest dir
         // vanished, disk full), everything parked gets moved back into
         // place instead of being gone for good. The DB row is left alone
         // until the replacement is confirmed on disk, for the same reason.
-        // Park *every* matching row, not just one — a second (duplicate)
+        // Park *every* matching row, not just one: a second (duplicate)
         // row left untouched here would otherwise keep pointing at a file
         // that may be gone once the replacement lands (the incoming file
         // gets moved to `dest`, and any duplicate's file sitting elsewhere
@@ -2028,7 +2028,7 @@ fn import_one(
                 });
             } else {
                 // The tracked row survived but its file didn't (e.g.
-                // deleted out from under breadarr) — nothing to park, but
+                // deleted out from under breadarr): nothing to park, but
                 // the stale row still needs dropping once the new file is
                 // confirmed in place.
                 old_siblings.push(StaleFile {
@@ -2042,7 +2042,7 @@ fn import_one(
             let parked_at = PathBuf::from(format!("{}.old", dest.display()));
             std::fs::rename(&dest, &parked_at)?;
             // Doesn't duplicate an existing park (from the tracked-row loop
-            // above) — only added when none of those already cover `dest`.
+            // above): only added when none of those already cover `dest`.
             old_siblings.push(StaleFile {
                 parked_at,
                 restore_to: dest.clone(),
@@ -2057,7 +2057,7 @@ fn import_one(
             stale.restore();
         }
         // `working_path` is the remux scratch copy (`source_path` is the
-        // real, still-intact download) — disposable, and left uncleaned it
+        // real, still-intact download): disposable, and left uncleaned it
         // leaks into whichever directory it was written in (see the same
         // cleanup added above for a failed remux).
         if remuxed {
@@ -2072,7 +2072,7 @@ fn import_one(
 
     if let Err(err) = move_or_copy_file(&working_path, &dest) {
         // Restore the original file rather than leaving the user with
-        // neither the old file nor the new one — this is the exact failure
+        // neither the old file nor the new one: this is the exact failure
         // mode a `DELETE`-then-place ordering used to leave unrecoverable.
         for stale in &old_siblings {
             stale.restore();
@@ -2084,7 +2084,7 @@ fn import_one(
     }
     if remuxed {
         // `working_path` (the remux scratch output) was already consumed by
-        // the move above either way — nothing left to clean up there. What's
+        // the move above either way; nothing left to clean up there. What's
         // left is `source_path`: qBittorrent's original pre-remux download,
         // a genuinely separate file from `working_path`. Nothing seeds it
         // anymore and its remuxed derivative is now safely in the library,
@@ -2092,8 +2092,8 @@ fn import_one(
         std::fs::remove_file(&source_path).ok();
     }
 
-    // The replacement is confirmed in place on disk — only now is it safe
-    // to drop the old tracking row(s) (by id, not by path — a tracked row's
+    // The replacement is confirmed in place on disk: only now is it safe
+    // to drop the old tracking row(s) (by id, not by path; a tracked row's
     // path may never have matched `dest` in the first place) and the
     // renamed-aside original(s).
     for stale in old_siblings {
@@ -2130,7 +2130,7 @@ fn import_one(
     )?;
 
     // Ground-truth check on the file that actually landed, not the
-    // release's claimed title text — this is what catches e.g. an
+    // release's claimed title text: this is what catches e.g. an
     // untagged-resolution release that turns out to really be SD. Probing
     // failure itself must never fail an otherwise-successful import.
     let quality_flagged = match ensure_probed(conn, episode_file_id, &dest) {
@@ -2146,7 +2146,7 @@ fn import_one(
             grab.media_item_id(),
             episode_id,
             // event_history's event_type CHECK has no dedicated value for
-            // this — reusing "failed" per the same established workaround
+            // this: reusing "failed" per the same established workaround
             // used elsewhere in this file (see the dest-collision skip case
             // above); the detail text carries the real reason.
             "failed",
@@ -2158,7 +2158,7 @@ fn import_one(
     }
 
     // Queue this freshly-imported file for the async AV1 transcode swap
-    // (see `transcode::run_cycle`) — the file is available in the library
+    // (see `transcode::run_cycle`); the file is available in the library
     // immediately, exactly as today; the transcode happens later in the
     // background. Never blocks or fails the import itself: enqueue errors
     // are logged and swallowed, same treatment as probing failures above.
@@ -2185,7 +2185,7 @@ struct SeasonPackImportOutcome {
 /// Imports a season-pack/batch torrent: unlike `import_one` (which resolves
 /// to exactly one destination file), a pack's `content_path` is typically a
 /// directory holding one file per episode. Each file is matched to its own
-/// episode independently by re-parsing *its own filename* — batch releases
+/// episode independently by re-parsing *its own filename*: batch releases
 /// almost always name each inner file with its own SxxExx marker even
 /// though the outer torrent name doesn't (that's precisely what made it
 /// unparseable as a single episode in the first place, see
@@ -2193,7 +2193,7 @@ struct SeasonPackImportOutcome {
 /// episode is skipped, not fatal to the rest of the pack.
 ///
 /// Deliberately does not run the mkv English-audio-default remux fix
-/// `import_one` applies inline — doing that per-file here would roughly
+/// `import_one` applies inline: doing that per-file here would roughly
 /// double a season pack's import time. Any file that needs it is still
 /// reachable afterward via `remux_backlog`, which sweeps the whole library
 /// including season-pack imports.
@@ -2344,7 +2344,7 @@ fn import_season_pack(
             params![release_id],
         )?;
     } else {
-        // Every file was unmatched and nothing was already-better either —
+        // Every file was unmatched and nothing was already-better either:
         // genuinely wrong (mismatched season, mislabeled pack). Propagating
         // this as an error routes it through the same retry/escalate-to-
         // failed machinery `process_pending_grabs` already applies to a
@@ -2406,9 +2406,9 @@ fn import_season_pack_file(
     // import_one's matching fix: a season pack's incoming file must be
     // compared against whatever this episode is *actually* tracked as
     // having, not against whatever happens to physically sit at `dest`
-    // right now — those can disagree if `root_folder` ever drifted after
+    // right now: those can disagree if `root_folder` ever drifted after
     // the tracked file was imported.
-    // Every matching row, not just one — same duplicate-row fix as
+    // Every matching row, not just one: same duplicate-row fix as
     // `import_one` (see its comment): nothing enforces a single
     // `episode_file` per episode, and `query_row` would silently pick an
     // arbitrary one, leaving any duplicate's row/file untouched and
@@ -2428,7 +2428,7 @@ fn import_season_pack_file(
         // A locally AV1-transcoded file is a deliberate shrink, not
         // something a season pack (scored against its own, much larger,
         // original release) should be allowed to silently overwrite just
-        // because its release score happens to be higher — that score was
+        // because its release score happens to be higher: that score was
         // never computed against a transcoded file's actual size/quality
         // tradeoff. Checked before the score comparison, same reasoning as
         // `movie_eligible_for_upgrade`/`enumerate_upgrade_targets`. Locked
@@ -2436,7 +2436,7 @@ fn import_season_pack_file(
         let upgrade_locked = existing_files.iter().any(|(_, _, ul)| *ul != 0);
         if upgrade_locked {
             // Nothing seeds this download anymore and it isn't going
-            // anywhere — this one file within the pack loses to what's
+            // anywhere: this one file within the pack loses to what's
             // already in place, so there's no reason to leave it orphaned
             // on disk (other files in the same pack are handled by their
             // own separate calls to this function, so only this one file
@@ -2454,8 +2454,8 @@ fn import_season_pack_file(
             return Ok(PackFileOutcome::SkippedAlreadyHaveBetter);
         }
         // This episode's file is being upgraded. Park aside whatever's
-        // actually here — the tracked row's real file and/or a stray file
-        // at `dest` with no tracked row — rather than deleting anything
+        // actually here: the tracked row's real file and/or a stray file
+        // at `dest` with no tracked row, rather than deleting anything
         // outright, so the replacement is placed and confirmed *before*
         // the original is actually given up. See import_one's matching
         // comment for the fuller reasoning; this is the same fix applied
@@ -2549,7 +2549,7 @@ fn import_season_pack_file(
 mod tests {
     use super::*;
 
-    /// Generates a tiny real video via ffmpeg's `lavfi` synthetic source —
+    /// Generates a tiny real video via ffmpeg's `lavfi` synthetic source:
     /// gives `ensure_probed`/`import_one` a real file to run actual ffprobe
     /// against, rather than only exercising the DB/flag-computation logic
     /// against hand-built fixtures.
@@ -2610,11 +2610,11 @@ mod tests {
     }
 
     /// A wider-than-16:9 master (2.00:1 is common for prestige/streaming
-    /// shows — verified live against a real "For All Mankind" episode at
+    /// shows; verified live against a real "For All Mankind" episode at
     /// exactly this resolution) has full 1920px width but under-1080
     /// height purely from the aspect ratio, not from being a worse encode.
     /// A height-only check flagged 49 real episodes of one show as
-    /// under-quality before this was caught — this file must NOT be
+    /// under-quality before this was caught: this file must NOT be
     /// flagged, since its width clears the 1080p-class bar even though its
     /// height doesn't.
     #[test]
@@ -2940,7 +2940,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(has_file, 1, "untouched — its own file still exists");
+        assert_eq!(has_file, 1, "untouched: its own file still exists");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2999,7 +2999,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(has_file, 1, "repaired, not cleared — file genuinely exists");
+        assert_eq!(has_file, 1, "repaired, not cleared: file genuinely exists");
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -3056,7 +3056,7 @@ mod tests {
             std::env::temp_dir().join(format!("breadarr-reconcile-breaker-{}", std::process::id()));
         media_item_with_root(&conn, 1, &root);
 
-        // 20 rows, all genuinely missing (no matching basename anywhere) —
+        // 20 rows, all genuinely missing (no matching basename anywhere):
         // comfortably past both the 10% fraction and the floor of 10.
         for i in 0..20 {
             conn.execute(
@@ -3116,7 +3116,7 @@ mod tests {
     // Regression coverage for a real production finding: several shows had
     // `episode` rows marked `has_file = 0` whose real file was sitting
     // exactly where breadarr's own importer would have put it, with no
-    // `episode_file` row at all — almost certainly a residue of an earlier
+    // `episode_file` row at all: almost certainly a residue of an earlier
     // DB-recovery incident. This models that shape directly: an episode row
     // with no matching episode_file, and a real file already at the
     // expected season directory bearing breadarr's own SxxEyy marker.
@@ -3159,7 +3159,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tracked_path, real_file.to_string_lossy());
-        // Purely additive — the file itself was never touched.
+        // Purely additive: the file itself was never touched.
         assert_eq!(std::fs::read(&real_file).unwrap(), b"already on disk, never linked");
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -3182,7 +3182,7 @@ mod tests {
         )
         .unwrap();
 
-        // No "Season 01" anywhere — only the unpadded convention.
+        // No "Season 01" anywhere: only the unpadded convention.
         let season_dir = dir.join("Season 1");
         std::fs::create_dir_all(&season_dir).unwrap();
         let real_file = season_dir.join("Some.Show.S01E01.Pilot.1080p.mkv");
@@ -3348,7 +3348,7 @@ mod tests {
     #[test]
     fn omits_a_cjk_only_episode_title_instead_of_embedding_it() {
         // TVDB sometimes has no English episode title at all for a given
-        // show, only the original Japanese one — verified live across
+        // show, only the original Japanese one; verified live across
         // several real shows' entire seasons.
         assert_eq!(
             deterministic_filename("Helck", 1, 3, Some("未知の敵"), "mkv"),
@@ -3434,7 +3434,7 @@ mod tests {
 
         move_or_copy_file(&src, &dest).unwrap();
 
-        assert!(!src.exists(), "source should be gone after a move — nothing seeds it anymore");
+        assert!(!src.exists(), "source should be gone after a move: nothing seeds it anymore");
         assert!(dest.exists());
         assert_eq!(std::fs::read(&dest).unwrap(), b"fake video data");
 
@@ -3465,7 +3465,7 @@ mod tests {
         let downloads =
             std::env::temp_dir().join(format!("breadarr-cleanup-file-test-{}", std::process::id()));
         std::fs::create_dir_all(&downloads).unwrap();
-        // A release with no wrapping folder — `move_or_copy_file` already
+        // A release with no wrapping folder: `move_or_copy_file` already
         // consumed it, so `content_path` no longer exists at all.
         let bare = downloads.join("Some.Movie.2016.1080p.mp4");
 
@@ -3699,7 +3699,7 @@ mod tests {
         .unwrap();
 
         // Grab 3: torrent hash absent from qBit's list, but well within the
-        // grace period — should not yet be failed.
+        // grace period: should not yet be failed.
         conn.execute(
             "INSERT INTO media_item (id, kind, title, year, monitored, quality_profile_id, root_folder)
              VALUES (3, 'movie', 'Fresh Grab', 2020, 1, 1, ?1)",
@@ -3713,7 +3713,7 @@ mod tests {
         )
         .unwrap();
 
-        // Grab 4: torrent hash absent from qBit's list, grabbed long ago —
+        // Grab 4: torrent hash absent from qBit's list, grabbed long ago;
         // should be marked failed.
         conn.execute(
             "INSERT INTO media_item (id, kind, title, year, monitored, quality_profile_id, root_folder)
@@ -3752,7 +3752,7 @@ mod tests {
                     .to_string(),
             },
             // hash-missing-fresh and hash-missing-stale are deliberately
-            // absent — simulating torrents qBit no longer knows about.
+            // absent: simulating torrents qBit no longer knows about.
         ];
 
         let (stats, hashes) = process_pending_grabs(&conn, &pending, &torrents, "", "", None).unwrap();
@@ -3818,7 +3818,7 @@ mod tests {
             hash: "hash-moving".to_string(),
             name: "moving".to_string(),
             // qBittorrent's own state for "setLocation relocation (or a
-            // manual move) still physically in flight" — content_path may
+            // manual move) still physically in flight": content_path may
             // already point at the destination while the bytes aren't
             // fully there yet.
             state: "moving".to_string(),
@@ -3867,7 +3867,7 @@ mod tests {
             "breadarr-persistent-import-error-{}",
             std::process::id()
         ));
-        // Deliberately empty — `locate_video_file` finds no video file
+        // Deliberately empty: `locate_video_file` finds no video file
         // here, so `import_one` fails deterministically every time,
         // simulating a persistent real-world error (bad path remap,
         // unreadable file) without needing to fake one out.
@@ -3919,7 +3919,7 @@ mod tests {
         use crate::qbit::TorrentInfo;
 
         let (conn, release_id) = seeded_release_conn(STALL_THRESHOLD_HOURS + 1.0);
-        // Same progress already recorded — otherwise `update_grab_progress`
+        // Same progress already recorded: otherwise `update_grab_progress`
         // would stamp `last_progress_at = now` and reset the stall clock.
         conn.execute(
             "UPDATE release SET last_seen_progress = 0.4, last_progress_at = datetime('now', ?1) WHERE id = ?2",
@@ -4069,7 +4069,7 @@ mod tests {
         std::fs::create_dir_all(&dest_root).unwrap();
         // A real, probeable h264/1080p clip, not placeholder bytes: since
         // `should_enqueue` now requires a successful probe (a `probe_failed`
-        // NULL-codec/NULL-height row must never enqueue an unclaimable job —
+        // NULL-codec/NULL-height row must never enqueue an unclaimable job:
         // see `should_enqueue`'s doc comment), a fake file would make
         // `ensure_probed` record `probe_failed` and this test would no
         // longer exercise the real "should this file be transcoded" path.
@@ -4147,7 +4147,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dest_root = dir.join("library");
         std::fs::create_dir_all(&dest_root).unwrap();
-        // Real, probeable content — see the sibling
+        // Real, probeable content; see the sibling
         // `import_one_enqueues_a_transcode_job_when_transcode_is_enabled`
         // test for why a fake file no longer exercises this path now that
         // `should_enqueue` requires an actual successful probe.
@@ -4169,7 +4169,7 @@ mod tests {
 
         import_one(&conn, &grab, &content, Some(&breadarr_shared::config::TranscodeConfig::default())).unwrap();
 
-        // Anime is no longer excluded from transcoding — it's routed to its
+        // Anime is no longer excluded from transcoding: it's routed to its
         // own pipeline (`is_anime = 1` on the job row), not skipped.
         let (job_count, is_anime): (i64, i64) = conn
             .query_row(
@@ -4260,7 +4260,7 @@ mod tests {
     fn import_one_flags_quality_when_the_real_file_is_under_1080p() {
         // Mirrors a real production case: a release whose title carries no
         // resolution tag at all turned out, once ffprobed, to actually be
-        // SD — this is the exact gap the post-import ground-truth check
+        // SD: this is the exact gap the post-import ground-truth check
         // closes (the pipeline previously only ever trusted claimed title
         // text, never the real downloaded bytes).
         let conn = Connection::open_in_memory().unwrap();
@@ -4336,9 +4336,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Generates a real mkv with two audio tracks — a non-English one
+    /// Generates a real mkv with two audio tracks: a non-English one
     /// flagged as default (track order 0), and English not-default (track
-    /// order 1) — so `remux_backlog` has a genuine "Italian track 1,
+    /// order 1), so `remux_backlog` has a genuine "Italian track 1,
     /// English track 2" case to fix, not just a hand-built fixture.
     fn generate_dual_audio_clip(dir: &Path) -> PathBuf {
         let path = dir.join("dual-audio.mkv");
@@ -4522,7 +4522,7 @@ mod tests {
             b"the better file, already imported"
         );
         // The losing download is cleaned up rather than left as a dangling
-        // duplicate — nothing seeds it and it lost the comparison.
+        // duplicate: nothing seeds it and it lost the comparison.
         assert!(!content.exists(), "the losing download should be deleted, not left behind");
 
         let status: String = conn
@@ -4597,11 +4597,11 @@ mod tests {
 
         // The new file's content landed at the shared deterministic path.
         assert_eq!(std::fs::read(&dest).unwrap(), b"the new, better file");
-        // The source is gone — it was moved, not copied or hardlinked
+        // The source is gone: it was moved, not copied or hardlinked
         // alongside a surviving original.
         assert!(!content.exists(), "source should be moved, not left behind");
 
-        // Exactly one episode_file row survives for this movie — the old
+        // Exactly one episode_file row survives for this movie: the old
         // one was removed, not left behind as a duplicate alongside the new.
         let file_count: i64 = conn
             .query_row(
@@ -4620,7 +4620,7 @@ mod tests {
     // duplicate-groups report exists precisely because duplicates occur),
     // but the old lookup used `query_row`, which silently returns only one
     // arbitrary matching row. A second duplicate row was left completely
-    // untouched — its `upgrade_locked` flag never even consulted, and its
+    // untouched: its `upgrade_locked` flag never even consulted, and its
     // file never parked-and-cleaned-up alongside the winning replacement.
     // This seeds two rows for the same movie and asserts the upgrade sweeps
     // both: both old files gone from disk, both old rows gone from the DB,
@@ -4715,12 +4715,12 @@ mod tests {
     }
 
     // Regression test for a real production bug: a movie's `root_folder`
-    // drifted (recategorized between library folders — the exact shape of
+    // drifted (recategorized between library folders, the exact shape of
     // a real incident found on "Cars 3", tracked at `.../Kids Movies/...`
     // while `root_folder` had since moved to `.../Movies/...`) after it was
     // already imported. The old dest-collision check only fired on
     // `dest.exists()`, which came back false once the destination path no
-    // longer matched where the tracked file actually lived — so the score
+    // longer matched where the tracked file actually lived, so the score
     // comparison was skipped entirely and a fresh grab landed right in
     // alongside the untouched original, a real duplicate. This asserts the
     // comparison still happens (and the two copies get consolidated into
@@ -4768,7 +4768,7 @@ mod tests {
         )
         .unwrap();
 
-        // The movie's root_folder has since drifted to a different folder —
+        // The movie's root_folder has since drifted to a different folder:
         // `dest` will never equal `old_path`.
         let new_root = dir.join("Movies").join("Cars 3 (2017)");
         std::fs::create_dir_all(&new_root).unwrap();
@@ -4790,7 +4790,7 @@ mod tests {
 
         let dest = new_root.join("Cars 3 (2017).mp4");
         assert_eq!(std::fs::read(&dest).unwrap(), b"the new, better file");
-        // The old tracked file, at its own (different) path, is gone —
+        // The old tracked file, at its own (different) path, is gone:
         // consolidated, not left behind as an untracked duplicate.
         assert!(
             !old_path.exists(),
@@ -4989,7 +4989,7 @@ mod tests {
         std::fs::create_dir_all(&season_dir).unwrap();
 
         // Episode 1's existing release scores *lower* than the incoming
-        // pack (5.0 vs the pack's 15.0) — on score alone this would be
+        // pack (5.0 vs the pack's 15.0): on score alone this would be
         // overwritten. It's also `upgrade_locked` (a completed local AV1
         // transcode), which must take priority over the score comparison.
         conn.execute(
@@ -5043,7 +5043,7 @@ mod tests {
         ));
         let pack_dir = dir.join("pack");
         std::fs::create_dir_all(&pack_dir).unwrap();
-        // Wrong season entirely — nothing here matches season 1's episodes.
+        // Wrong season entirely: nothing here matches season 1's episodes.
         std::fs::write(pack_dir.join("Show.S02E01.mkv"), b"wrong season").unwrap();
         std::fs::write(pack_dir.join("Show.S02E02.mkv"), b"wrong season").unwrap();
         let dest_root = dir.join("library");
@@ -5089,7 +5089,7 @@ mod tests {
             [],
         )
         .unwrap();
-        // Naive S01E15 — must not be chosen over the mapped episode.
+        // Naive S01E15: must not be chosen over the mapped episode.
         conn.execute(
             "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file)
              VALUES (15, 1, 1, 15, 1, 0)",

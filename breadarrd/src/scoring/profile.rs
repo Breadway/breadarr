@@ -11,7 +11,7 @@ pub struct Weights {
     pub seeder: f32,
     /// Weighted heavily on purpose: resolution is the single most visible
     /// quality axis, and without it in the score, same-episode releases at
-    /// 480p/720p/1080p (routine — SubsPlease and friends publish all three
+    /// 480p/720p/1080p (routine; SubsPlease and friends publish all three
     /// of an episode within the same feed window) scored identically apart
     /// from source/codec, letting a lower-resolution duplicate arrive later
     /// and outscore (and at import time, overwrite) an already-grabbed
@@ -23,7 +23,7 @@ pub struct Weights {
     pub container: f32,
     pub group_allowlist: f32,
     pub repack: f32,
-    /// HDR/Dolby Vision bonus. Always 0 on TV/anime profiles — only movie
+    /// HDR/Dolby Vision bonus. Always 0 on TV/anime profiles: only movie
     /// profiles score this axis at all, per the product decision that HDR
     /// only matters for movies.
     pub hdr: f32,
@@ -80,13 +80,13 @@ impl QualityProfile {
     }
 
     /// Builds the default profile for `kind`, then applies a user-supplied
-    /// JSON weights override on top of it — the `quality_profile.weights`
+    /// JSON weights override on top of it: the `quality_profile.weights`
     /// column's actual content, finally read instead of ignored. Every
     /// field is individually optional, so e.g. `{"hdr": 5.0}` overrides
     /// only the HDR bonus and leaves every other axis at its built-in
     /// default, rather than requiring a full weights object to change one
     /// number. Empty (`""`/`"{}"`), missing, or malformed JSON all
-    /// harmlessly fall back to exactly the hardcoded defaults — a bad
+    /// harmlessly fall back to exactly the hardcoded defaults: a bad
     /// config value must never break scoring or gating.
     pub fn with_weights_override(kind: ProfileKind, weights_json: &str) -> Self {
         let mut profile = match kind {
@@ -111,7 +111,7 @@ impl QualityProfile {
 }
 
 /// Every field optional so a partial JSON object only overrides the axes it
-/// actually names — matches `serde_json::from_str`'s normal "missing field
+/// actually names: matches `serde_json::from_str`'s normal "missing field
 /// stays at its `Default`" behavior for a struct made entirely of
 /// `Option<f32>` fields.
 #[derive(Debug, Clone, Default, Deserialize)]

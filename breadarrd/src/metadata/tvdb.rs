@@ -20,7 +20,7 @@ impl TvdbClient {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            // No total timeout is reqwest's default — the background loop
+            // No total timeout is reqwest's default; the background loop
             // holds the DB mutex across calls into this client, so a
             // stalled connection would hang the whole daemon.
             client: reqwest::Client::builder()
@@ -130,12 +130,12 @@ impl TvdbClient {
         }
 
         // TVDB's plain `/episodes/default` returns names in the show's
-        // original airing language — for a lot of anime that's Japanese,
+        // original airing language: for a lot of anime that's Japanese,
         // with no English name at all (verified live: entire shows came
         // back Japanese-only). `/episodes/default/eng` is the same episode
         // list (same numbering/air-date fields) but with TVDB's own
         // crowd-sourced English translation substituted in for `name`
-        // wherever one exists — a real translation, not a guess, so it's
+        // wherever one exists: a real translation, not a guess, so it's
         // tried first and only falls back to the original-language
         // endpoint if TVDB has no English data for this show at all.
         let token = self.token().await?;

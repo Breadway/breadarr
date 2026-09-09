@@ -41,7 +41,7 @@ fn seeder_score(seeders: u32) -> f32 {
     ((seeders as f32) + 1.0).ln()
 }
 
-/// An unparsed resolution scores the same as the bottom tier — no signal
+/// An unparsed resolution scores the same as the bottom tier: no signal
 /// either way, not a reason to reject, but not a reason to prefer it either.
 fn resolution_tier(resolution: Option<u32>) -> f32 {
     match resolution {
@@ -52,7 +52,7 @@ fn resolution_tier(resolution: Option<u32>) -> f32 {
     }
 }
 
-/// Explicit tiers — `Source::Hdtv` is discriminant 0, so casting the enum
+/// Explicit tiers: `Source::Hdtv` is discriminant 0, so casting the enum
 /// to `u8` scored HDTV identically to an unknown/missing source.
 fn source_tier(source: Option<Source>) -> f32 {
     match source {
@@ -117,7 +117,7 @@ mod tests {
         // Diminishing returns on a log scale: the *same absolute* jump of
         // +45 seeders matters far more starting from 5 than starting from
         // 4000 (equal-ratio jumps like 5->50 vs 400->4000 are a different,
-        // roughly-equal-delta comparison — not what's being tested here).
+        // roughly-equal-delta comparison; not what's being tested here).
         let low_plus_45 = score(&parsed, 50, false, &profile) - low;
         let high_plus_45 = score(&parsed, 4045, false, &profile) - high;
         assert!(low_plus_45 > high_plus_45);
@@ -159,7 +159,7 @@ mod tests {
     fn higher_resolution_outscores_lower_all_else_equal() {
         // The real scenario this guards: SubsPlease et al. publish 480p,
         // 720p, and 1080p of the same episode within the same feed
-        // window — without a resolution term, these scored identically
+        // window; without a resolution term, these scored identically
         // apart from seeders, letting a later lower-res duplicate outscore
         // (and overwrite at import) an already-grabbed 1080p file.
         let profile = QualityProfile::default_tv();

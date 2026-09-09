@@ -14,7 +14,7 @@ pub struct OrtEmbedder {
 }
 
 impl OrtEmbedder {
-    /// CPU-only — no execution-provider selection. A GPU on a typical media
+    /// CPU-only: no execution-provider selection. A GPU on a typical media
     /// server is usually already busy with transcoding, and a 90MB
     /// MiniLM-class model is cheap enough on CPU that a multi-backend GPU
     /// setup isn't worth the added complexity for a model this small.

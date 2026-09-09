@@ -12,7 +12,7 @@ impl TmdbClient {
     pub fn new(bearer_token: impl Into<String>) -> Self {
         Self {
             bearer_token: bearer_token.into(),
-            // No total timeout is reqwest's default — the background loop
+            // No total timeout is reqwest's default; the background loop
             // holds the DB mutex across calls into this client, so a
             // stalled connection would hang the whole daemon.
             client: reqwest::Client::builder()

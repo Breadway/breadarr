@@ -10,7 +10,7 @@ pub enum RejectReason {
     GroupDenylisted,
     NoEnglishAudio,
     /// Below 1080p while a 1080p-or-better candidate exists for the same
-    /// target in this same search batch — rejected in favor of the better
+    /// target in this same search batch: rejected in favor of the better
     /// one, not because low resolution is inherently disqualifying (a
     /// release with no 1080p+ option anywhere is still accepted; see
     /// `GateContext::better_resolution_available`).
@@ -26,7 +26,7 @@ pub enum GateResult {
 pub struct GateContext {
     pub seeders: Option<u32>,
     pub size_bytes: Option<u64>,
-    /// Episode/movie runtime, when known — used to sanity-check size against
+    /// Episode/movie runtime, when known: used to sanity-check size against
     /// implied bitrate. Frequently unavailable (neither TVDB's nor TMDB's
     /// episode-level data reliably carries this), so size checks fall back
     /// to absolute per-resolution bounds when absent.
@@ -36,12 +36,12 @@ pub struct GateContext {
     /// Japanese-only audio when no English release exists at all.
     pub is_anime: bool,
     /// True when at least one other candidate in the same search batch
-    /// parsed to 1080p or better — the signal that makes a sub-1080p
+    /// parsed to 1080p or better: the signal that makes a sub-1080p
     /// candidate here a real downgrade rather than the only option. Always
     /// `false` on the RSS feed-watch path (no batch of alternatives to
     /// compare against there), so this gate never fires for that path.
     pub better_resolution_available: bool,
-    /// A season/batch release covering many episodes in one torrent — its
+    /// A season/batch release covering many episodes in one torrent: its
     /// total size is naturally a multiple of a single episode's, so the
     /// per-episode size/bitrate sanity check would reject it as absurdly
     /// oversized every time. There's no reliable episode count to scale
@@ -240,7 +240,7 @@ mod tests {
         let parsed = parser::parse("Some Show S01 1080p WEB-DL H264");
         let mut c = ctx();
         c.is_season_pack = true;
-        // A whole season's worth of episodes at once — would fail
+        // A whole season's worth of episodes at once: would fail
         // size_is_sane badly if evaluated as if it were one episode.
         c.size_bytes = Some(400_000_000 * 12);
         assert_eq!(
