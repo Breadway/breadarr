@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use serde::Deserialize;
 
 /// Fribb/anime-lists cross-references AniDB anime entries (roughly one per
-/// TV season/cour) to TVDB/TMDB ids and season numbers — this is what
+/// TV season/cour) to TVDB/TMDB ids and season numbers: this is what
 /// Sonarr itself relies on for anime scene-numbering, and unlike
 /// manami-project/anime-offline-database it actually carries TVDB/TMDB ids
 /// (verified: the offline-database has none at all).
@@ -37,7 +37,7 @@ struct OffsetField {
 /// Downloads the current Fribb/anime-lists dataset and upserts it into
 /// `anime_mapping` (TV) and `anime_tmdb_movie` (movies). Returns the number
 /// of `anime_mapping` entries processed (movie ids aren't counted the same
-/// way — one entry can contribute several).
+/// way: one entry can contribute several).
 pub async fn refresh(conn: &mut Connection, client: &reqwest::Client) -> Result<usize> {
     let bytes = client
         .get(SOURCE_URL)
@@ -58,7 +58,7 @@ pub async fn refresh(conn: &mut Connection, client: &reqwest::Client) -> Result<
     for e in &entries {
         // `themoviedb_id` carries either a `tv` id (a single number) or a
         // `movie` id list (rereleases/split cuts can give one AniDB entry
-        // several TMDB movie ids) — never both in practice, but nothing
+        // several TMDB movie ids); never both in practice, but nothing
         // guarantees that, so both are checked independently rather than
         // assuming one implies the absence of the other.
         let tv_tmdb_id = e
@@ -82,7 +82,7 @@ pub async fn refresh(conn: &mut Connection, client: &reqwest::Client) -> Result<
         }
 
         // ~63% of entries have no AniDB cross-reference at all (AniList/MAL/Kitsu-only
-        // listings) — irrelevant to a table keyed on anidb_id, skip them.
+        // listings): irrelevant to a table keyed on anidb_id, skip them.
         let Some(anidb_id) = e.anidb_id else {
             continue;
         };
@@ -117,7 +117,7 @@ pub async fn refresh(conn: &mut Connection, client: &reqwest::Client) -> Result<
 /// for a known TVDB series.
 ///
 /// One TVDB season is often stitched together from several AniDB cours,
-/// each its own `anime_mapping` row with its own `episode_offset` — e.g.
+/// each its own `anime_mapping` row with its own `episode_offset`, e.g.
 /// tvdb_id 366263 (Ascendance of a Bookworm) has cours starting at absolute
 /// episodes 1, 15, 27, 37 (offsets 0, 14, 26, 36). The matching cour is the
 /// one with the largest offset that's still below the target absolute

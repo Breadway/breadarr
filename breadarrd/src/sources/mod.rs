@@ -10,7 +10,7 @@ use async_trait::async_trait;
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawReleaseItem {
     pub title: String,
-    /// Magnet URI or direct .torrent download URL — qBittorrent's add-by-URL
+    /// Magnet URI or direct .torrent download URL: qBittorrent's add-by-URL
     /// endpoint accepts either identically.
     pub link: String,
     pub guid: String,
@@ -29,7 +29,7 @@ pub trait ReleaseSource {
 
 /// Trackers attached to every magnet we synthesize from an info-hash
 /// (TPB, torrents-csv, YTS). Same set the TPB client has used since it
-/// landed — qBittorrent needs *some* announce list or the torrent sits
+/// landed: qBittorrent needs *some* announce list or the torrent sits
 /// hash-only until DHT finds peers.
 const MAGNET_TRACKERS: &[&str] = &[
     "udp://tracker.opentrackr.org:1337/announce",
@@ -39,7 +39,7 @@ const MAGNET_TRACKERS: &[&str] = &[
     "udp://exodus.desync.com:6969/announce",
 ];
 
-/// A valid BitTorrent v1 info_hash: 40 hex chars or 32 base32 chars — same
+/// A valid BitTorrent v1 info_hash: 40 hex chars or 32 base32 chars, same
 /// shape `qbit::extract_btih` accepts out of a magnet URI. Shared by every
 /// hash-to-magnet source so a malformed value can't silently produce a
 /// magnet the grab path then fails to parse back.
@@ -81,7 +81,7 @@ pub(crate) fn urlencode(s: &str) -> String {
 pub(crate) fn parse_human_size(s: &str) -> Option<u64> {
     let s = s.trim();
     // Split on the first character that isn't part of the number, rather
-    // than requiring a literal space — some sources render this without one
+    // than requiring a literal space: some sources render this without one
     // ("38.1GiB"). Requiring a space made `split_once(' ')` return `None`
     // for those, silently leaving `size_bytes` unset rather than failing
     // outright: the gate's size sanity check (`gate.rs`) treats a missing
@@ -96,7 +96,7 @@ pub(crate) fn parse_human_size(s: &str) -> Option<u64> {
         "B" => 1.0,
         // 1337x labels these "KB/MB/GB" (decimal-looking) but the numbers
         // are actually binary (1024-based), matching every other torrent
-        // site's convention — treat them the same as the KiB/MiB/GiB nyaa
+        // site's convention: treat them the same as the KiB/MiB/GiB nyaa
         // uses.
         "KiB" | "KB" => 1024.0,
         "MiB" | "MB" => 1024.0 * 1024.0,
@@ -127,7 +127,7 @@ mod tests {
     }
 
     // Regression test for a real gap found in review: some sources render
-    // this with no space between the number and the unit — the old
+    // this with no space between the number and the unit; the old
     // `split_once(' ')` returned `None` for those, silently leaving
     // `size_bytes` unset (which skips the gate's size sanity check entirely)
     // rather than rejecting a value this parser genuinely couldn't read.

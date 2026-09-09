@@ -7,7 +7,7 @@ use super::{build_magnet, is_valid_info_hash, urlencode, RawReleaseItem, Release
 /// Public JSON search over the torrents.csv DHT dump. Same grab shape as
 /// TPB (info-hash → magnet, no HTML): used as the first general-content
 /// fallback when apibay is down or returns nothing. Seeders are scrape
-/// snapshots, not live tracker data, so a high number can still stall —
+/// snapshots, not live tracker data, so a high number can still stall;
 /// the existing seeder gate still applies.
 pub struct TorrentsCsvSource {
     api_url: String,

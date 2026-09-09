@@ -6,12 +6,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/breadarrd
-# `always`, not `on-failure` — a clean-but-wrong exit (e.g. the background
+# `always`, not `on-failure`: a clean-but-wrong exit (e.g. the background
 # grab/import loop falling out of its own retry logic) should still trigger
 # a restart, not leave the daemon dead until someone notices by hand.
 Restart=always
 RestartSec=2
-# 0022, not a restrictive 0077 — breadarrd writes into media library folders
+# 0022, not a restrictive 0077: breadarrd writes into media library folders
 # that Jellyfin (or another user/process) needs to read.
 UMask=0022
 RuntimeDirectory=breadarr

@@ -29,10 +29,10 @@ pub struct Config {
 
 /// Where the TUI's "add" flow places new series/movies by default. Sonarr/
 /// Radarr let you pick a root folder per add; a single configured default per
-/// kind is a reasonable v1 simplification — per-add picking can follow later.
+/// kind is a reasonable v1 simplification; per-add picking can follow later.
 /// Series and movies need *separate* defaults (not one shared value) because
 /// they live under different category roots on disk (e.g. `TV Shows/` vs
-/// `Movies/`) — a real production bug had both kinds falling back to one
+/// `Movies/`): a real production bug had both kinds falling back to one
 /// bare library root with no per-item subfolder, landing new grabs directly
 /// in the library root instead of inside their own show/movie folder,
 /// invisible to Jellyfin's per-category libraries.
@@ -56,13 +56,13 @@ fn default_movies_root_folder() -> String {
 pub struct SourcesConfig {
     /// 1337x's main domain bans IPs at the Cloudflare WAF level after
     /// bursts of automated traffic. Its community mirrors run on separate
-    /// domains/Cloudflare zones, so a ban on one doesn't carry over — tried
+    /// domains/Cloudflare zones, so a ban on one doesn't carry over; tried
     /// in order, falling back on failure, so losing one to a future ban
     /// doesn't take the source down. Verified working (not Cloudflare-
     /// challenged, genuine 1337x content) as of 2026-07-11.
     #[serde(default = "default_1337x_mirrors")]
     pub torrent_1337x_mirrors: Vec<String>,
-    /// English-translated anime category — matches the actual anime library
+    /// English-translated anime category: matches the actual anime library
     /// (nyaa carries no non-anime content, so a broader/unfiltered feed
     /// would just be pure noise against everything else monitored).
     #[serde(default = "default_nyaa_rss_url")]
@@ -70,7 +70,7 @@ pub struct SourcesConfig {
     #[serde(default = "default_grab_poll_interval_secs")]
     pub grab_poll_interval_secs: u64,
     /// Human kill switch for the passive RSS-feed grab loop (nyaa, anime
-    /// only) — same reasoning as `search_enabled`/`upgrade_enabled`, kept
+    /// only); same reasoning as `search_enabled`/`upgrade_enabled`, kept
     /// as its own flag since this loop watches a different source and can
     /// need to be paused independently of the search-driven ones.
     #[serde(default = "default_grab_enabled")]
@@ -79,42 +79,42 @@ pub struct SourcesConfig {
     pub import_poll_interval_secs: u64,
     #[serde(default = "default_search_poll_interval_secs")]
     pub search_poll_interval_secs: u64,
-    /// Search requests per cycle across 1337x + nyaa search combined — kept
+    /// Search requests per cycle across 1337x + nyaa search combined; kept
     /// small since this is the one source with a ban history; clears a
     /// 50-item backlog in ~5 hours at the default interval without ever
     /// looking like a request flood to any single mirror.
     #[serde(default = "default_search_budget_per_cycle")]
     pub search_budget_per_cycle: usize,
-    /// Human kill switch for the search-driven loop — a restart resets all
+    /// Human kill switch for the search-driven loop: a restart resets all
     /// in-memory mirror cooldown/backoff state, so this (not a persisted
     /// flag) is the deliberate way to keep it off across restarts.
     #[serde(default = "default_search_enabled")]
     pub search_enabled: bool,
-    /// A community JSON API mirror of The Pirate Bay's search — the
+    /// A community JSON API mirror of The Pirate Bay's search: the
     /// primary general-content (movies + non-anime TV) search source.
     /// Unlike 1337x this needs no HTML scraping and actually ranks by
     /// relevance rather than pure seeder count, which matters a lot for
     /// titles made of common words.
     #[serde(default = "default_tpb_api_url")]
     pub tpb_api_url: String,
-    /// torrents.csv DHT-dump search — first fallback when TPB fails or
+    /// torrents.csv DHT-dump search: first fallback when TPB fails or
     /// returns nothing. Same hash-to-magnet grab shape as TPB, covers
     /// movies and TV.
     #[serde(default = "default_torrents_csv_url")]
     pub torrents_csv_url: String,
-    /// YTS v2 list_movies JSON — movie-only fallback after TPB / torrents-csv.
+    /// YTS v2 list_movies JSON: movie-only fallback after TPB / torrents-csv.
     /// `yts.mx` does not resolve; this default is a working host as of
     /// 2026-08-16.
     #[serde(default = "default_yts_api_url")]
     pub yts_api_url: String,
     /// Human kill switch for the upgrade-search loop, same reasoning as
-    /// `search_enabled` — off by default would mean nothing ever improves,
+    /// `search_enabled`: off by default would mean nothing ever improves,
     /// but a user who's happy with their current files (or wants to save
     /// request budget) can disable it independently of missing-content
     /// search.
     #[serde(default = "default_upgrade_enabled")]
     pub upgrade_enabled: bool,
-    /// Deliberately much longer than `search_poll_interval_secs` — this
+    /// Deliberately much longer than `search_poll_interval_secs`: this
     /// loop re-checks content that's already satisfied (a file exists), so
     /// there's no urgency the way a missing episode has, and every cycle
     /// still costs the same request budget as a missing-content search.
@@ -124,7 +124,7 @@ pub struct SourcesConfig {
     pub upgrade_budget_per_cycle: usize,
     /// Minimum score improvement (on top of the same weighted-score scale
     /// `should_grab` already compares) required before a periodic upgrade
-    /// check will actually re-grab — without this, a file already on disk
+    /// check will actually re-grab: without this, a file already on disk
     /// could get replaced over and over for score deltas too small to
     /// matter, wasting bandwidth on churn. Repacks/propers always supersede
     /// regardless of this threshold, same as the normal grab path.
@@ -243,7 +243,7 @@ pub struct DaemonConfig {
     #[serde(default = "default_model_dir")]
     pub model_dir: String,
     /// Bearer token required on every API request when non-empty. Empty
-    /// (the default) means auth is off entirely — allowed only when
+    /// (the default) means auth is off entirely: allowed only when
     /// `listen_addr` is loopback. A non-loopback bind with an empty token
     /// is rejected at load. When set, the token must be at least 16
     /// characters so a length-oracle of short guesses is useless.
@@ -263,7 +263,7 @@ impl Default for DaemonConfig {
     }
 }
 
-/// qBittorrent WebUI connection. `base_url` empty means "not configured" —
+/// qBittorrent WebUI connection. `base_url` empty means "not configured":
 /// callers should error out rather than guessing a default.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct QbitConfig {
@@ -277,7 +277,7 @@ pub struct QbitConfig {
     pub category: String,
     /// qBittorrent's own container-internal path prefix for its downloads
     /// (e.g. "/downloads"), when it runs in Docker while breadarr runs
-    /// natively on the same host — needed to translate the paths qBittorrent
+    /// natively on the same host: needed to translate the paths qBittorrent
     /// reports via its API into paths breadarr can actually open. Both empty
     /// means no remapping (qBittorrent's reported paths are used as-is).
     #[serde(default)]
@@ -289,7 +289,7 @@ pub struct QbitConfig {
 /// Push-notification target for events that otherwise sit invisible until
 /// the TUI is next opened (a review-queue item, a run of import failures,
 /// the search-driven loop halting). `webhook_url` empty means "not
-/// configured" — no notifications sent, matching every other optional
+/// configured": no notifications sent, matching every other optional
 /// integration's default. The payload is a simple `{"title", "message"}`
 /// JSON body, which is directly Gotify's own message API shape (this
 /// user's actual self-hosted push service) and close enough to what most
@@ -313,14 +313,14 @@ pub struct JellyfinConfig {
 /// GPU-accelerated AV1 transcode: re-encodes freshly-grabbed and existing
 /// library files down to a space-reasonable size instead of keeping
 /// whatever the source release happened to be (REMUX, huge season packs,
-/// etc). `enabled` defaults false — this needs a manual calibration pass
+/// etc). `enabled` defaults false: this needs a manual calibration pass
 /// against real content on the target GPU before it's safe to run
 /// unattended against a whole library.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TranscodeConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Tight on purpose — the actual pace is bottlenecked by encode time
+    /// Tight on purpose: the actual pace is bottlenecked by encode time
     /// (minutes per file), not this interval; a short poll just means a
     /// freshly-completed job's slot gets refilled promptly instead of
     /// sitting idle for the rest of a longer interval.
@@ -329,32 +329,32 @@ pub struct TranscodeConfig {
     #[serde(default = "default_vaapi_device")]
     pub vaapi_device: String,
     /// Applies to both pipelines identically when Jellyfin reports an
-    /// active transcoding session — deliberately not split per-pipeline;
+    /// active transcoding session: deliberately not split per-pipeline;
     /// when someone's actually watching something, both the GPU (which
     /// they're using) and CPU (contending for the same box) should back off.
     #[serde(default = "default_parallelism_min")]
     pub parallelism_min: usize,
     /// The total concurrent **live-action** (`av1_vaapi`, GPU-bound) stream
-    /// budget — not just "the batch job's cap", but the real ceiling the
+    /// budget: not just "the batch job's cap", but the real ceiling the
     /// GPU can sustain at all, batch work and live Jellyfin viewers
     /// combined. `transcode::live_action_parallelism_for` subtracts however
     /// many Jellyfin transcode sessions are actually active from this
     /// number to get the batch job's actual parallelism each cycle, so
     /// real viewers get exactly the headroom they need rather than the
     /// batch job dropping to a flat minimum regardless of how many people
-    /// are watching. Deliberately separate from `parallelism_max_anime` —
+    /// are watching. Deliberately separate from `parallelism_max_anime`:
     /// the two pipelines contend for genuinely different hardware (GPU
     /// encode engine vs CPU threads), so raising one shouldn't raise the
     /// other. Empirically calibrated on Hestia's Arc A380: per-stream
     /// throughput stays above 1.5x realtime through 7 concurrent streams,
     /// crosses below it at 8 (aggregate throughput itself plateaus around
     /// ~12x realtime from 5-6 streams on, i.e. the GPU's actual saturation
-    /// point) — see [[breadarr-av1-transcode]] for the full scaling-test
+    /// point); see [[breadarr-av1-transcode]] for the full scaling-test
     /// numbers.
     #[serde(default = "default_parallelism_max")]
     pub parallelism_max: usize,
     /// Ramp-up ceiling for concurrent **anime** (`libsvtav1`, CPU-bound)
-    /// encode streams — capped separately from `parallelism_max` (see its
+    /// encode streams: capped separately from `parallelism_max` (see its
     /// doc comment) precisely because a single shared cap would let "raise
     /// GPU parallelism" accidentally also raise anime concurrency, and
     /// anime jobs are CPU-thread-hungry (`anime_svtav1_max_threads` each)
@@ -374,7 +374,7 @@ pub struct TranscodeConfig {
     #[serde(default = "default_reference_height")]
     pub reference_height: u32,
     /// AV1 reaches equivalent perceived quality to HEVC at a meaningfully
-    /// lower bitrate — this factor is applied on top of the resolution
+    /// lower bitrate: this factor is applied on top of the resolution
     /// scaling so the AV1 target isn't just a like-for-like copy of the
     /// HEVC/H264 reference bitrate. Conservative (not maximally aggressive)
     /// on purpose: erring toward "still clearly smaller" over "as small as
@@ -382,55 +382,55 @@ pub struct TranscodeConfig {
     #[serde(default = "default_av1_efficiency_factor")]
     pub av1_efficiency_factor: f32,
     /// HDR10/Dolby Vision metadata preservation through the GPU encoder
-    /// hasn't been verified yet — excluded from both the backfill and the
+    /// hasn't been verified yet: excluded from both the backfill and the
     /// post-grab path until that's specifically checked on a few samples.
     #[serde(default = "default_exclude_hdr")]
     pub exclude_hdr: bool,
     /// Excludes the 2160p tier from the first pass for the same reason as
     /// `exclude_hdr` (most current 4K content in this library is HDR
-    /// anyway) — revisit once HDR handling is confirmed safe.
+    /// anyway); revisit once HDR handling is confirmed safe.
     #[serde(default = "default_exclude_min_height")]
     pub exclude_min_height: u32,
-    /// `global_quality` for the live-action `av1_vaapi` `QVBR` encode — the
+    /// `global_quality` for the live-action `av1_vaapi` `QVBR` encode: the
     /// actual quality driver now that rate control is quality-based rather
     /// than a flat bitrate target (see `run_ffmpeg_encode_live_action`).
     /// `reference_bitrate_kbps`/`av1_efficiency_factor` still compute a
     /// `-b:v`/`-maxrate`/`-bufsize` ceiling alongside this, so a source that's
     /// already unusually efficient doesn't get inflated up toward the
-    /// ceiling — QVBR only spends up to it on content that actually needs it.
+    /// ceiling: QVBR only spends up to it on content that actually needs it.
     #[serde(default = "default_quality_live_action")]
     pub quality_live_action: u32,
     /// Root folder path prefixes (exact string prefix match against
     /// `episode_file.path`) routed to the anime encode pipeline
     /// (`run_ffmpeg_encode_anime`) instead of the live-action one, regardless
-    /// of `anime_mapping`/`anime_tmdb_movie` metadata coverage — path is a
+    /// of `anime_mapping`/`anime_tmdb_movie` metadata coverage: path is a
     /// more reliable signal than TVDB/TMDB anime-list membership, which has
     /// real gaps (e.g. Avatar: The Last Airbender and some Dragon Ball movies
     /// were missing from those tables and slipped through as "not anime").
-    /// Empty by default (a no-op) — set per-deployment to match how the
+    /// Empty by default (a no-op); set per-deployment to match how the
     /// library is actually organized.
     #[serde(default)]
     pub anime_root_folders: Vec<String>,
     /// CRF for the anime pipeline's software `libsvtav1` encode (0-63, lower
     /// = higher quality/larger). No hardware AV1 10-bit encode entrypoint
     /// exists on Hestia's Arc A380 (`vainfo` only lists `AV1Profile0`,
-    /// 8-bit) — anime needs true 10-bit output to avoid banding in the flat
+    /// 8-bit); anime needs true 10-bit output to avoid banding in the flat
     /// gradients the art style is full of, so this pipeline trades GPU
     /// offload for CPU-based `libsvtav1` specifically to get it.
     #[serde(default = "default_quality_anime")]
     pub quality_anime: u32,
     /// `libsvtav1` preset (0-13, lower = slower/better compression AND more
-    /// memory-hungry — SVT-AV1's lookahead/reference buffering scales with
+    /// memory-hungry: SVT-AV1's lookahead/reference buffering scales with
     /// preset, not just thread count). Raised from an initial guess of 6 to
     /// 10 after a real validation run hit a genuine kernel OOM: preset 6 on
     /// a single 1080p anime episode grew to 9.3GB resident memory on
     /// Hestia's 6-core/12-thread box. This runs as unattended background
     /// work, so trading some compression efficiency for a much smaller,
-    /// safer memory footprint is the right call — see
+    /// safer memory footprint is the right call; see
     /// `anime_svtav1_max_threads` for the other half of that fix.
     #[serde(default = "default_anime_svtav1_preset")]
     pub anime_svtav1_preset: u32,
-    /// Passed to `libsvtav1` as `-svtav1-params lp=N` — caps how many
+    /// Passed to `libsvtav1` as `-svtav1-params lp=N`: caps how many
     /// worker threads it uses, independent of preset. More parallel workers
     /// means more concurrently-buffered frames, so this is the other lever
     /// (alongside `anime_svtav1_preset`) for bounding the encoder's peak
@@ -445,7 +445,7 @@ pub struct TranscodeConfig {
     /// discarded (job marked `skipped`, original left untouched) rather than
     /// swapped in. Exists because quality-driven rate control can still
     /// occasionally produce an output that's the same size as or larger than
-    /// an already-efficient source — this is the invariant that makes that
+    /// an already-efficient source: this is the invariant that makes that
     /// safe regardless of how good the rate-control tuning is, after a real
     /// incident where flat-bitrate VBR targeting silently produced files
     /// *larger* than the original on the majority of a backfill.
@@ -453,7 +453,7 @@ pub struct TranscodeConfig {
     pub min_size_reduction_pct: f64,
     /// Skip attempting a transcode at all (no GPU/CPU time spent) when the
     /// source's current bitrate is already at or below this fraction of the
-    /// resolution-scaled ceiling (`target_bitrate_kbps`) — a strong signal
+    /// resolution-scaled ceiling (`target_bitrate_kbps`); a strong signal
     /// there's little room left to save, so it's not worth the encode time
     /// to find out (the `min_size_reduction_pct` check above would reject
     /// most of these anyway, this just avoids paying for that finding).
@@ -461,7 +461,7 @@ pub struct TranscodeConfig {
     pub skip_below_ceiling_ratio: f64,
     /// Size (seconds) of each of the three start/middle/end windows
     /// `ffprobe::verify_decodable_sampled` actually decodes, instead of the
-    /// whole file — a full decode verification was measured as the actual
+    /// whole file: a full decode verification was measured as the actual
     /// CPU bottleneck of a transcode cycle (400%+ CPU per job, dwarfing the
     /// GPU encode time), not the encode itself. Bounds verification cost to
     /// a small constant regardless of source length.
@@ -509,7 +509,7 @@ fn default_parallelism_min() -> usize {
 
 fn default_parallelism_max() -> usize {
     // The measured total GPU budget (not "batch cap plus a static
-    // reservation") — `live_action_parallelism_for` dynamically subtracts
+    // reservation"); `live_action_parallelism_for` dynamically subtracts
     // real Jellyfin transcode sessions from this each cycle. Raised from
     // an initial conservative guess of 2 after an actual concurrent-stream
     // scaling test on Hestia's Arc A380 (see `parallelism_max`'s doc
@@ -519,7 +519,7 @@ fn default_parallelism_max() -> usize {
 }
 
 fn default_parallelism_max_anime() -> usize {
-    // Kept at the original conservative shared-cap value — unlike
+    // Kept at the original conservative shared-cap value; unlike
     // `parallelism_max`, this hasn't been load-tested at higher counts.
     // A real incident already showed a *single* uncapped anime job could
     // hit 9.3GB resident memory; multiple concurrent anime jobs (each its
@@ -551,14 +551,14 @@ fn default_exclude_min_height() -> u32 {
 }
 
 // Starting point for `av1_vaapi`'s `-global_quality` under `QVBR`, needs the
-// same real-hardware calibration pass as the bitrate reference did — this is
+// same real-hardware calibration pass as the bitrate reference did; this is
 // a reasonable guess (roughly x264/x265 "visually near-lossless" territory
 // on the encoder's internal QP-like scale), not a measured value.
 fn default_quality_live_action() -> u32 {
     26
 }
 
-// SVT-AV1 CRF starting point for the anime pipeline — slightly lower
+// SVT-AV1 CRF starting point for the anime pipeline: slightly lower
 // (higher quality) than the live-action guess above since flat-color/
 // gradient-heavy anime content shows banding more readily than live-action
 // grain/texture does at the same nominal quality level. Also unvalidated
@@ -616,12 +616,12 @@ impl Config {
 
     /// Rejects values that are individually syntactically valid TOML but
     /// make the daemon unsafe or the transcode pipeline's math nonsensical
-    /// — a typo here would otherwise only surface much later, or bind an
+    /// a typo here would otherwise only surface much later, or bind an
     /// unauthenticated API on a reachable address.
     fn validate(&self) -> Result<()> {
         // `target_bitrate_kbps` divides by `reference_height` (via
         // `reference_pixels`); zero makes that ratio `f64::INFINITY`, which
-        // saturates to `u32::MAX` on the cast back to `u32` — then
+        // saturates to `u32::MAX` on the cast back to `u32`; then
         // `run_ffmpeg_encode_live_action`'s `bitrate_ceiling_kbps * 3`
         // overflows that `u32::MAX` (panics in a debug build, silently
         // wraps to a nonsense small value in release).
@@ -630,7 +630,7 @@ impl Config {
             "transcode.reference_height must be greater than 0"
         );
         // `is_beneficial` computes `original_bytes * (1.0 -
-        // min_size_reduction_pct)` as the max allowed output size — a
+        // min_size_reduction_pct)` as the max allowed output size: a
         // negative value here would raise that ceiling *above* the
         // original, letting a transcode that actually grew the file still
         // count as "beneficial." That's the exact failure mode
@@ -730,8 +730,8 @@ fn config_path() -> PathBuf {
 }
 
 fn expand_home(input: &str) -> PathBuf {
-    // Was: falls through to `PathBuf::from(input)` — a literal, unexpanded
-    // "~/..." string — whenever the `HOME` env var itself isn't set.
+    // Was: falls through to `PathBuf::from(input)`, a literal, unexpanded
+    // "~/..." string, whenever the `HOME` env var itself isn't set.
     // PathBuf/std::fs never expand `~`, so that fallback silently produced
     // a path relative to the current working directory instead of the
     // user's actual home. Same bug class as breadclip-core/breadpad-shared/
@@ -826,7 +826,7 @@ mod tests {
     // Regression test for a real gap found in review: `reference_height =
     // 0` makes `target_bitrate_kbps`'s resolution-scaling ratio divide by
     // zero, which eventually overflows a `u32` multiplication deep inside
-    // the live-action encoder's maxrate calculation — a config typo that
+    // the live-action encoder's maxrate calculation: a config typo that
     // used to only surface as a panic/garbage value in the middle of an
     // encode, not at startup.
     #[test]
@@ -837,7 +837,7 @@ mod tests {
 
     // Regression test for a real gap found in review: a negative
     // `min_size_reduction_pct` would let `is_beneficial` accept an encode
-    // that actually *grew* the file — the exact invariant this field exists
+    // that actually *grew* the file: the exact invariant this field exists
     // to guarantee against.
     #[test]
     fn rejects_a_negative_min_size_reduction_pct() {

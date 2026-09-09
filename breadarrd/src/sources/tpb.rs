@@ -4,11 +4,11 @@ use serde::Deserialize;
 
 use super::{build_magnet, is_valid_info_hash, urlencode, RawReleaseItem, ReleaseSource};
 
-/// A community-run JSON API mirror of The Pirate Bay's search — unlike
+/// A community-run JSON API mirror of The Pirate Bay's search: unlike
 /// 1337x, this is a genuine machine-readable API (not HTML scraping), and
 /// unlike 1337x's HTML results table, `info_hash` is enough to build a
 /// magnet directly: no second detail-page fetch needed to resolve a link
-/// before grabbing. Also proved dramatically more precise in practice —
+/// before grabbing. Also proved dramatically more precise in practice:
 /// its search actually ranks by relevance, where 1337x's is a pure
 /// seeder-count sort that buries genuine matches for common-word titles
 /// under unrelated, much-more-seeded content.
@@ -31,7 +31,7 @@ impl TpbSource {
     pub fn new(api_url: impl Into<String>) -> Self {
         Self {
             api_url: api_url.into(),
-            // No total timeout is reqwest's default — the background loop
+            // No total timeout is reqwest's default; the background loop
             // holds the DB mutex across this fetch, so a stalled connection
             // would hang the whole daemon.
             client: reqwest::Client::builder()
@@ -66,11 +66,11 @@ impl ReleaseSource for TpbSource {
         Ok(results
             .into_iter()
             // A query with no matches returns a single sentinel row
-            // (id="0", an all-zero info_hash) rather than an empty array —
+            // (id="0", an all-zero info_hash) rather than an empty array;
             // has to be filtered out explicitly or it'd be treated as one
             // real (and completely bogus) result. The all-zero hash is
             // itself 40 valid hex characters, so `is_valid_info_hash` alone
-            // wouldn't catch it — both checks are needed, not one replacing
+            // wouldn't catch it: both checks are needed, not one replacing
             // the other.
             .filter(|r| {
                 r.id != "0"
@@ -135,7 +135,7 @@ mod tests {
     // Regression test for a real gap found in review: a malformed
     // `info_hash` from apibay used to flow straight into `build_magnet`
     // with no validation, silently producing a magnet `qbit::extract_btih`
-    // can't parse back out — downgrading that grab to the slow polling path
+    // can't parse back out: downgrading that grab to the slow polling path
     // with no error surfaced anywhere.
     #[test]
     fn is_valid_info_hash_rejects_malformed_values() {

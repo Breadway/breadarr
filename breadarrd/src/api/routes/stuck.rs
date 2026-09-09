@@ -6,12 +6,12 @@ use breadarr_shared::dto::{MaxedSearchTarget, StalledGrab, StuckReport};
 use crate::api::AppState;
 
 /// Deliberately earlier than importer::mod's own `STALL_THRESHOLD_HOURS`
-/// (72h) — this report exists to surface a stuck grab *before* the
+/// (72h); this report exists to surface a stuck grab *before* the
 /// daemon's own auto-fail kicks in, not just repeat it after the fact.
 const STALLED_GRAB_HOURS: f64 = 48.0;
 
 /// Matches the point where the search-driven loop's exponential backoff
-/// (`6h * 2^(count-1)`, capped at 168h) saturates — see `scheduler::
+/// (`6h * 2^(count-1)`, capped at 168h) saturates; see `scheduler::
 /// DUE_CLAUSE`. A target still at this count with no successful grab has
 /// been failing its search every single time for at least a week.
 const MAXED_SEARCH_COUNT: i64 = 6;

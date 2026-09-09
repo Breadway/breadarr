@@ -12,7 +12,7 @@ fn to_info(r: &crate::api::CycleRecord) -> CycleInfo {
     }
 }
 
-/// Unauthenticated liveness — cheap, no cycle detail.
+/// Unauthenticated liveness: cheap, no cycle detail.
 pub async fn health() -> Json<HealthStatus> {
     Json(HealthStatus {
         status: "ok".to_string(),

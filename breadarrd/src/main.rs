@@ -28,7 +28,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<()> {
     let config = Config::load()?;
     // ort logs its own session/hardware setup at INFO, which drowns out
-    // everything else at the default level — keep it to warnings and up.
+    // everything else at the default level: keep it to warnings and up.
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(format!(
             "{},ort::logging=warn",
@@ -141,7 +141,7 @@ async fn run_daemon(config: Config) -> Result<()> {
     }
     if let Err(e) = db::backup_before_open(&config.db_path()) {
         // Never block startup on a backup failure (disk full, permissions)
-        // — losing the safety net for this one run is far better than the
+        // losing the safety net for this one run is far better than the
         // daemon refusing to start at all.
         tracing::warn!(error = %e, "database backup failed, continuing without one");
     }
@@ -159,7 +159,7 @@ async fn run_daemon(config: Config) -> Result<()> {
 
     // A second, independent connection for the HTTP API rather than sharing
     // `background_loop`'s. Both point at the same on-disk (WAL-mode)
-    // database, so this doesn't weaken consistency — it just means an API
+    // database, so this doesn't weaken consistency: it just means an API
     // request (a TUI poll, a review-queue approval) is no longer serialized
     // behind whatever `background_loop` happens to be doing, which used to
     // include holding its connection's lock across an entire grab/import/
@@ -245,7 +245,7 @@ async fn run_daemon(config: Config) -> Result<()> {
     let mut state = state;
     if background.is_some() {
         // Only set once the background loop is actually going to run and
-        // poll the receiver end of this channel — otherwise `background_rx`
+        // poll the receiver end of this channel: otherwise `background_rx`
         // (moved into the discarded `.map()` closure above, since `.map()`
         // never calls its closure on `None`) is already dropped, and any
         // send on `background_tx` would hang forever with no receiver.
@@ -256,7 +256,7 @@ async fn run_daemon(config: Config) -> Result<()> {
 
     let app = api::router(state);
     // `background_loop` holds a `rusqlite::Connection` across `.await`
-    // points, which isn't `Send` — it has to stay a branch of this same
+    // points, which isn't `Send`: it has to stay a branch of this same
     // root future (already not `Send`-constrained, since it's only ever
     // `.await`ed directly, never `tokio::spawn`ed) rather than its own task.
     tokio::select! {
@@ -273,7 +273,7 @@ async fn run_daemon(config: Config) -> Result<()> {
         } => {
             // `background_loop` retries its own init and never returns in
             // normal operation, so reaching here means something truly
-            // unexpected happened — exit non-zero rather than falling
+            // unexpected happened: exit non-zero rather than falling
             // through to `Ok(())`, so systemd's `Restart=` actually engages
             // instead of leaving a "successfully exited" daemon dead until
             // someone notices by hand.
@@ -303,11 +303,11 @@ async fn load_title_matcher(config: &Config) -> Result<matcher::TitleMatcher> {
 
 /// Runs the daemon's own auto-grab/import/search loop for as long as the
 /// process lives. Owns its own `TitleMatcher` (the HTTP API never needs one
-/// — matching only happens when a fresh release comes in here or in a
+/// (matching only happens when a fresh release comes in here or in a
 /// review-queue approval, which just replays an already-decided grab).
 /// nyaa RSS (anime TV) is a feed watch; movies and non-anime TV go through
 /// the search-driven loop instead (1337x, or nyaa's search mode for anime
-/// movies) — see `scheduler::run_search_cycle`.
+/// movies), see `scheduler::run_search_cycle`.
 async fn background_loop(
     conn: std::sync::Arc<tokio::sync::Mutex<Connection>>,
     qbit: std::sync::Arc<QbitClient>,
@@ -379,7 +379,7 @@ async fn background_loop(
 
     // A transient failure here (network blip during the one-time model
     // download, momentary disk issue) must not permanently disable the
-    // loop — `run_daemon`'s `select!` treats a *return* from this function
+    // loop: `run_daemon`'s `select!` treats a *return* from this function
     // as fatal and exits the whole process, but only so systemd's restart
     // policy can engage; retrying in-place first means a blip doesn't need
     // a process restart at all.
@@ -427,7 +427,7 @@ async fn background_loop(
     ));
     // Guards against the transcode ticker itself blocking every other cycle
     // (import, search, upgrade, reconcile) for the full multi-minute
-    // duration of an encode — the ticker below spawns each cycle detached
+    // duration of an encode: the ticker below spawns each cycle detached
     // rather than awaiting it inline, and this is what stops two spawned
     // cycles from running at once if one is still going when the next tick
     // fires (a real possibility: files easily take longer to encode than
@@ -437,11 +437,11 @@ async fn background_loop(
     let mut transcode_ticker = tokio::time::interval(std::time::Duration::from_secs(
         config.transcode.poll_interval_secs,
     ));
-    // Disk state doesn't change on its own — hourly is plenty to catch a
+    // Disk state doesn't change on its own: hourly is plenty to catch a
     // file deleted/moved by hand without adding meaningful load (one query
     // per tracked episode file, all local). Deliberately does *not* fire at
     // t=0 like the other tickers (`tokio::time::interval`'s default first
-    // tick is immediate) — startup is exactly when a network/removable mount
+    // tick is immediate): startup is exactly when a network/removable mount
     // is most likely to still be coming up, and reconcile misreading an
     // absent mount as a mass file deletion is the one failure mode worth
     // paying a full interval's delay to avoid.
@@ -459,7 +459,7 @@ async fn background_loop(
     // Cycle-level backoff on top of the search loop's own per-mirror
     // cooldowns: a whole cycle failing (source exhausted, or an outright
     // error) means something's more broadly wrong than one bad mirror, so
-    // back off the *cycle interval* itself — 1h, 2h, 4h, capped — rather
+    // back off the *cycle interval* itself: 1h, 2h, 4h, capped, rather
     // than keep firing every `search_poll_interval_secs` regardless.
     let mut search_skip_ticks: u32 = 0;
     let mut search_fail_streak: u32 = 0;
@@ -508,7 +508,7 @@ async fn background_loop(
                         n.send("breadarr: quality concern", &format!(
                             "{} freshly-imported file(s) failed a post-import ground-truth check \
                              (under 1080p or unreadable, despite what the release title claimed) \
-                             — see the library-health report", stats.quality_flagged
+                             ; see the library-health report", stats.quality_flagged
                         )).await;
                     }
                 }
@@ -576,7 +576,7 @@ async fn background_loop(
                 };
                 if just_halted {
                     if let Some(n) = &notifier {
-                        n.send("breadarr: search halted", "The search-driven loop has failed 10 cycles in a row and is now at max backoff — still retrying automatically, but this needs attention.").await;
+                        n.send("breadarr: search halted", "The search-driven loop has failed 10 cycles in a row and is now at max backoff; still retrying automatically, but this needs attention.").await;
                     }
                 }
                 if let (Ok(stats), Some(n)) = (&result, &notifier) {
@@ -627,7 +627,7 @@ async fn background_loop(
                 }
                 let Ok(busy_permit) = transcode_busy.clone().try_lock_owned() else {
                     // A previous cycle is still running (this file's
-                    // encode took longer than one poll interval) — skip
+                    // encode took longer than one poll interval): skip
                     // this tick rather than spawning a second overlapping
                     // one; the still-running cycle will pick up any newly
                     // pending jobs on its own next iteration anyway.
@@ -664,7 +664,7 @@ async fn background_loop(
                         if let Some(n) = &notifier {
                             n.send("breadarr: reconcile aborted", &format!(
                                 "reconcile found far more missing files than expected in one pass and refused to \
-                                 touch anything — check whether a library mount is offline. Nothing was changed. \
+                                 touch anything; check whether a library mount is offline. Nothing was changed. \
                                  (details: {outcome:?})"
                             )).await;
                         }
@@ -675,7 +675,7 @@ async fn background_loop(
                             if let Some(n) = &notifier {
                                 n.send("breadarr: files went missing", &format!(
                                     "{} file(s) tracked in the library are no longer on disk \
-                                     (deleted or moved outside breadarr) — cleared from tracking, \
+                                     (deleted or moved outside breadarr): cleared from tracking, \
                                      will be re-searched if still monitored. {} other stale path(s) \
                                      were auto-repaired.", outcome.cleared, outcome.repaired
                                 )).await;
@@ -720,7 +720,7 @@ async fn background_loop(
                         if let Ok(stats) = &result {
                             info!(?stats, media_item_id, "manual search-now complete");
                         }
-                        // Ignore a send failure — the HTTP request that asked
+                        // Ignore a send failure: the HTTP request that asked
                         // for this may have already timed out/disconnected,
                         // which doesn't invalidate the search itself (it
                         // still ran and any grabs it made are already
@@ -1110,13 +1110,13 @@ async fn debug_scan_movies(config: &Config, path: &str) -> Result<()> {
 }
 
 /// Manually scoped acquisition pass over a single already-tracked show or
-/// movie: every currently-missing episode, in one bounded run — not subject
+/// movie: every currently-missing episode, in one bounded run, not subject
 /// to the background loop's per-cycle budget or due-ness cadence (those
 /// exist to pace *unattended, indefinite* operation; a one-off, explicitly
 /// requested pass over one title's own backlog doesn't need throttling
 /// against itself). Still uses the same mirror rotation/cooldown and
 /// per-item jitter as the background loop, so it stays no more aggressive
-/// per request than normal operation — just not spread across hours.
+/// per request than normal operation: just not spread across hours.
 async fn debug_search_show(config: &Config, title: &str) -> Result<()> {
     if config.qbit.base_url.is_empty() {
         bail!("qbit.base_url is not set in config");
@@ -1220,7 +1220,7 @@ async fn debug_search_show(config: &Config, title: &str) -> Result<()> {
 }
 
 /// Dry-run report of what `reconcile_missing_files` would do against the
-/// configured database, without writing anything — meant to be run by hand
+/// configured database, without writing anything: meant to be run by hand
 /// against a freshly-restored or otherwise suspect database before trusting
 /// the daemon's own hourly reconcile ticker to run unattended against it.
 async fn debug_reconcile_report(config: &Config) -> Result<()> {
@@ -1234,7 +1234,7 @@ async fn debug_reconcile_report(config: &Config) -> Result<()> {
     println!("{outcome:?}");
     if outcome.aborted {
         println!(
-            "ABORTED: too many files looked missing at once (see logs) — do not run live \
+            "ABORTED: too many files looked missing at once (see logs); do not run live \
              reconcile against this database until you've investigated why."
         );
     } else if outcome.cleared > 20 {
@@ -1248,7 +1248,7 @@ async fn debug_reconcile_report(config: &Config) -> Result<()> {
 }
 
 /// Lists qBittorrent torrents (optionally filtered by category) as
-/// tab-separated hash/progress/state/name — read-only, and deliberately
+/// tab-separated hash/progress/state/name: read-only, and deliberately
 /// prints nothing about how the client authenticated (credentials never
 /// leave `QbitClient`). Meant for ad-hoc reconciliation between a `release`
 /// row's `raw_title` and qBittorrent's own view when a hash needs to be
@@ -1272,7 +1272,7 @@ async fn debug_qbit_list(config: &Config, category: Option<&str>) -> Result<()> 
 
 /// Sweeps the whole library for files flagged `flag_non_english_default_audio`
 /// (a non-English track set as default) and applies the same track-promotion
-/// fix already used automatically right after a fresh download — but against
+/// fix already used automatically right after a fresh download, but against
 /// files already sitting in the library. Deliberately a manual command, not
 /// wired to any ticker: unlike the read-mostly `probe_library` sweep, this
 /// rewrites real files.
@@ -1289,7 +1289,7 @@ async fn remux_backlog_cmd(config: &Config) -> Result<()> {
 }
 
 /// Runs `probe_library` repeatedly until a full pass finds nothing left to
-/// probe — the running daemon does this incrementally (bounded per hourly
+/// probe: the running daemon does this incrementally (bounded per hourly
 /// tick, see `PROBE_SWEEP_BATCH_LIMIT`) so a large existing library backlog
 /// doesn't stall the grab/import/search cycles; this command is for
 /// immediately backfilling that same backlog by hand instead of waiting for
@@ -1297,7 +1297,7 @@ async fn remux_backlog_cmd(config: &Config) -> Result<()> {
 /// One-time reconciliation for episodes whose `episode_file` association
 /// went missing (almost certainly the earlier DB-recovery incident) despite
 /// their real file still sitting exactly where breadarr's own importer
-/// would have put it — see `importer::find_relinkable_episode_files`'s doc
+/// would have put it; see `importer::find_relinkable_episode_files`'s doc
 /// comment for the full story. Purely additive: reports what it found
 /// before touching anything, never moves/deletes/overwrites a single file,
 /// and flags ambiguous matches for a human to look at rather than guessing.
@@ -1356,14 +1356,14 @@ async fn probe_library_cmd(config: &Config) -> Result<()> {
 
 /// One-time backfill: enqueues every existing-library file eligible for
 /// AV1 transcoding (see `transcode::find_backlog_candidates` for the exact
-/// eligibility rules — not already AV1, not anime, not HDR/2160p+ per the
+/// eligibility rules: not already AV1, not anime, not HDR/2160p+ per the
 /// first pass's scope) as a `transcode_job` row, then drives the same
 /// worker loop the daemon's steady-state ticker uses
 /// (`transcode::run_cycle`) until nothing is left pending. Shares that one
-/// code path deliberately — there is exactly one place that actually runs
+/// code path deliberately: there is exactly one place that actually runs
 /// an encode, whether triggered by a backlog sweep or a fresh grab.
 // Deliberately does NOT call `transcode::reset_orphaned_running_jobs` on
-// startup the way `run_daemon` does — from this CLI's vantage point a
+// startup the way `run_daemon` does: from this CLI's vantage point a
 // `running` row could belong to the actual daemon's own ticker legitimately
 // working on it right now (see the safety writeup on `claim_pending_jobs`:
 // running this backfill alongside a live daemon with transcode enabled is
@@ -1374,7 +1374,7 @@ async fn probe_library_cmd(config: &Config) -> Result<()> {
 // `running` until the daemon is next restarted (which does its own reset).
 async fn transcode_library_cmd(config: &Config) -> Result<()> {
     if !config.transcode.enabled {
-        bail!("transcode.enabled is false in config — enable it before running a backfill");
+        bail!("transcode.enabled is false in config: enable it before running a backfill");
     }
     if let Some(parent) = config.db_path().parent() {
         std::fs::create_dir_all(parent)?;
@@ -1403,13 +1403,13 @@ async fn transcode_library_cmd(config: &Config) -> Result<()> {
 
 /// Re-transcodes files a real rate-control bug left larger than their
 /// original (already AV1, so `transcode-library`'s own backfill query
-/// excludes them) — see `transcode::find_oversized_av1_candidates`'s doc
+/// excludes them); see `transcode::find_oversized_av1_candidates`'s doc
 /// comment for the full story. Enqueues with `force_reencode: true`, the
 /// only thing that lets `encode_and_verify` attempt a real re-encode of a
 /// file that's already AV1 rather than treating it as nothing-to-do.
 async fn retranscode_oversized_cmd(config: &Config) -> Result<()> {
     if !config.transcode.enabled {
-        bail!("transcode.enabled is false in config — enable it before running this");
+        bail!("transcode.enabled is false in config: enable it before running this");
     }
     if let Some(parent) = config.db_path().parent() {
         std::fs::create_dir_all(parent)?;
@@ -1440,7 +1440,7 @@ async fn retranscode_oversized_cmd(config: &Config) -> Result<()> {
 /// whatever's now `pending` in `transcode_job` via repeated `run_cycle`
 /// calls until nothing is left, printing a running total. The only
 /// difference between the two commands is which candidates got enqueued
-/// (and with what `force_reencode` value) before this runs — there's
+/// (and with what `force_reencode` value) before this runs; there's
 /// exactly one place that actually drives the worker loop to completion.
 async fn drive_transcode_queue_to_completion(conn: Connection, config: &Config) -> Result<()> {
     let jellyfin = if config.jellyfin.base_url.is_empty() {
@@ -1476,12 +1476,12 @@ async fn drive_transcode_queue_to_completion(conn: Connection, config: &Config) 
     Ok(())
 }
 
-/// Runs `importer::verify_library` — the expensive full-decode corruption
+/// Runs `importer::verify_library`: the expensive full-decode corruption
 /// check (`ffmpeg -xerror`, actually decoding every frame) against every
 /// header-probed-ok file that hasn't been decode-verified yet. Unlike
 /// `probe_library_cmd`, this deliberately doesn't loop to a fixed point:
 /// each file can take minutes, so one full pass over whatever's currently
-/// unverified is the whole point of a single invocation — run it again
+/// unverified is the whole point of a single invocation; run it again
 /// later (or on a cron) to pick up files added since.
 async fn verify_library_cmd(config: &Config) -> Result<()> {
     if let Some(parent) = config.db_path().parent() {

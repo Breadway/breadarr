@@ -114,7 +114,7 @@ pub async fn add(
 
     let root_folder = constrain_root_folder(&req.root_folder, &state.config.default_root_folder())?;
 
-    // Fetch before taking the lock — a sync MutexGuard can't be held across
+    // Fetch before taking the lock: a sync MutexGuard can't be held across
     // an `.await` point.
     let episodes = tvdb.episodes(&req.tvdb_id).await.map_err(internal)?;
 
@@ -220,7 +220,7 @@ async fn set_episode_monitored(
 
 /// Toggles every episode in one season and the `season.monitored` flag
 /// when a season row exists (`insert_series` writes those). A missing
-/// season row is not an error — episodes still update.
+/// season row is not an error: episodes still update.
 pub async fn monitor_season(
     State(state): State<AppState>,
     Path((media_item_id, season_number)): Path<(i64, i64)>,
@@ -248,7 +248,7 @@ async fn set_season_monitored(
             params![monitored as i64, media_item_id, season_number],
         )
         .map_err(internal)?;
-    // Season row is best-effort — older libraries (or movies) may have none.
+    // Season row is best-effort: older libraries (or movies) may have none.
     let _ = conn.execute(
         "UPDATE season SET monitored = ?1 WHERE media_item_id = ?2 AND season_number = ?3",
         params![monitored as i64, media_item_id, season_number],
@@ -263,7 +263,7 @@ async fn set_season_monitored(
 }
 
 /// Removes a media item (and, via cascade, its episodes/aliases/releases)
-/// from the library. Deliberately does not touch anything on disk — the
+/// from the library. Deliberately does not touch anything on disk: the
 /// same "stop managing this, don't delete the user's files" default
 /// Sonarr/Radarr use.
 pub async fn delete(
@@ -280,12 +280,12 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Deletes an episode's imported file — both the row *and* the actual file
-/// on disk — and clears `has_file`, freeing the episode to be grabbed again
+/// Deletes an episode's imported file: both the row *and* the actual file
+/// on disk, and clears `has_file`, freeing the episode to be grabbed again
 /// by a future search. Unlike `delete` above, this deliberately does touch
 /// disk: the whole point is "this specific file is wrong/broken," and
 /// leaving it in place would (a) mislead the user into thinking they still
-/// have a good copy, and (b) block a future re-grab outright — `import_one`
+/// have a good copy, and (b) block a future re-grab outright: `import_one`
 /// refuses to overwrite an existing file with an equal-or-lower-scoring one
 /// (see its dest-collision check), so a bad file that happened to score
 /// high would silently reject its own replacement forever if left on disk.
@@ -316,7 +316,7 @@ pub async fn delete_episode_file(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Movie counterpart to `delete_episode_file` — movies have no `has_file`
+/// Movie counterpart to `delete_episode_file`: movies have no `has_file`
 /// column of their own (`movie_needs_grab` derives "has a file" purely from
 /// `episode_file` row existence), so clearing the row is the entire state
 /// reset needed.
@@ -342,9 +342,9 @@ pub async fn delete_movie_file(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Shared cleanup: removes the file from disk (tolerating "already gone" —
+/// Shared cleanup: removes the file from disk (tolerating "already gone":
 /// nothing left to do, not an error) and deletes its `episode_file` row by
-/// that row's own primary key — never by `episode_id`/`media_item_id`
+/// that row's own primary key, never by `episode_id`/`media_item_id`
 /// alone, which a TV show shares across every one of its episode rows and
 /// would otherwise risk wiping an entire show's tracked files instead of
 /// the one the caller actually looked up.
@@ -380,7 +380,7 @@ fn delete_file_and_clear(
     Ok(())
 }
 
-/// Manual "search now" for a single show/movie's whole current backlog —
+/// Manual "search now" for a single show/movie's whole current backlog:
 /// bypasses the background loop's per-cycle budget and due-ness cadence
 /// (those exist to pace unattended, indefinite operation; a single
 /// user-triggered request doesn't need throttling against itself).
@@ -388,7 +388,7 @@ fn delete_file_and_clear(
 /// Dispatched to the background loop via a channel rather than run inline
 /// here: the search pipeline (`execute_search_targets` and everything it
 /// calls) holds a `Connection`/`&dyn ReleaseSource` across `.await` points,
-/// which makes it `!Send` — fine for the background loop (part of the root
+/// which makes it `!Send`: fine for the background loop (part of the root
 /// future, never `Send`-constrained) but not callable directly from an axum
 /// handler (whose future axum requires to be `Send`). Routing through the
 /// background loop's own already-running instance also means this reuses
@@ -439,7 +439,7 @@ pub async fn grab_candidate(
     grab_candidate_via_background(&state, id, None, req).await
 }
 
-/// Episode candidate picker — resolves the episode's own `media_item_id`
+/// Episode candidate picker: resolves the episode's own `media_item_id`
 /// first (every other candidate/search-target function needs it), same
 /// pattern as `set_episode_monitored`.
 pub async fn list_episode_candidates(

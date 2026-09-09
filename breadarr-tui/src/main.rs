@@ -96,7 +96,7 @@ async fn handle_key(app: &mut App, key: KeyEvent, roots: &LibraryRoots) {
         return;
     }
 
-    // Incremental Library title filter — same input-mode isolation as Add.
+    // Incremental Library title filter: same input-mode isolation as Add.
     if matches!(app.tab, Tab::Library) && matches!(app.focus, Focus::LibraryFilterInput) {
         match code {
             KeyCode::Enter => app.confirm_library_filter(),
@@ -144,7 +144,7 @@ async fn handle_key(app: &mut App, key: KeyEvent, roots: &LibraryRoots) {
     }
 
     // Any key other than a second `x`/`d` clears a pending delete
-    // confirmation — the confirmation must be the very next keypress, not
+    // confirmation: the confirmation must be the very next keypress, not
     // just "any keypress before the user gets distracted."
     if app.confirm_delete && code != KeyCode::Char('x') {
         app.confirm_delete = false;

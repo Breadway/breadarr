@@ -26,7 +26,7 @@ fastrand.workspace = true
 nix.workspace = true
 # Forces reqwest's native-tls backend to statically build and link its own
 # OpenSSL instead of dynamically linking whatever libssl/libcrypto happens
-# to be on the build host — CI (see ci/build.sh) links against an archived
+# to be on the build host: CI (see ci/build.sh) links against an archived
 # old-glibc sysroot for hestia compatibility, which has no libssl/libcrypto
 # of its own to dynamically link against. Also means the shipped binary no
 # longer depends on the target system's OpenSSL version at all.

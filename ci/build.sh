@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Delegates to bread-ecosystem's shared CI build image/script, pinned to
-# the commit in ci/bread-ecosystem.rev — not `main`. bread-ecosystem's CI
+# the commit in ci/bread-ecosystem.rev, not `main`. bread-ecosystem's CI
 # files now affect every product's release pipeline, so bumping the pin
 # is a deliberate act instead of silent drift (see the bread-theme test
 # that broke here for exactly that reason, before it was pinned by rev).
@@ -23,7 +23,7 @@ fi
 
 # hestia (breadarrd's actual deployment target) runs Ubuntu 24.04 (glibc
 # 2.39). The shared CI image is Arch, which tracks a much newer glibc
-# (currently 2.43) — a binary linked normally there refuses to start on
+# (currently 2.43): a binary linked normally there refuses to start on
 # hestia (glibc symbol versioning is forward-only). Rather than patch the
 # shared image (would affect every other product's build), pull down a
 # real, complete glibc + matching gcc-libs (for libstdc++) from the Arch
@@ -32,8 +32,8 @@ fi
 #
 # cargo-zigbuild (targeting an older glibc via zig's cross-linker) was
 # tried first and doesn't work here: zig only maintains a version database
-# for glibc's own symbols, not libstdc++'s, and onnxruntime — statically
-# linked in by the `ort` crate — needs a real, complete libstdc++, not
+# for glibc's own symbols, not libstdc++'s, and onnxruntime, statically
+# linked in by the `ort` crate, needs a real, complete libstdc++, not
 # zig's minimal stand-in. A real archived glibc+gcc-libs package pair,
 # linked via --sysroot, sidesteps that entirely.
 GLIBC_VER="2.39-4"
@@ -57,7 +57,7 @@ if [ ! -d "${OLD_GLIBC_CACHE}/usr/lib" ]; then
     rm -f /tmp/old-glibc.pkg.tar.zst /tmp/old-gcc-libs.pkg.tar.zst
 fi
 # The shared build script only bind-mounts $ROOT (as /workspace) into the
-# container, not arbitrary host paths — so the cached sysroot has to be
+# container, not arbitrary host paths, so the cached sysroot has to be
 # copied under $ROOT to be visible there. The download above is cached
 # persistently in /tmp across runs; this copy is just a fast local `cp`.
 rm -rf "${ROOT}/.ci-old-glibc"

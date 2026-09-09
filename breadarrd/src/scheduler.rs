@@ -13,7 +13,7 @@ pub enum ProcessOutcome {
     Grabbed {
         media_item_id: i64,
         episode_id: Option<i64>,
-        /// Set when this grab was a season pack — lets a search-cycle
+        /// Set when this grab was a season pack: lets a search-cycle
         /// caller recognize that a single-episode target got satisfied
         /// incidentally by a whole-season grab, not just by an exact
         /// `episode_id` match.
@@ -27,33 +27,33 @@ pub enum ProcessOutcome {
     GateRejected(scoring::RejectReason),
     NotBetterThanExisting,
     /// Movie-only: the release's own parsed year and the monitored movie's
-    /// year differ by more than one — the TV path's equivalent guard is
+    /// year differ by more than one; the TV path's equivalent guard is
     /// season/episode resolution; movies have no such structural signal, so
     /// year is the only cheap defense against a same-named-but-wrong film
     /// (e.g. "Dune" 1984 vs 2021).
     YearMismatch,
-    /// qBittorrent rejected the magnet outright (a dead hash, most likely —
+    /// qBittorrent rejected the magnet outright (a dead hash, most likely;
     /// a source's own seeder count can be stale). Deliberately an `Ok`
     /// outcome, not a propagated `Err`: unlike a transient network failure,
     /// the exact same hash will reject identically forever, so this needs
-    /// to be marked seen and moved past rather than retried — treating it
+    /// to be marked seen and moved past rather than retried: treating it
     /// as a generic error once caused an infinite retry loop on a single
     /// dead candidate (verified live).
     MagnetRejected,
     /// The torrent was (most likely) actually added to qBittorrent, but its
-    /// hash couldn't be correlated back — recorded as a `failed` release
+    /// hash couldn't be correlated back: recorded as a `failed` release
     /// (not `grabbed`) so it doesn't block the episode/movie from being
     /// re-searched forever (a `grabbed`-with-NULL-hash row is invisible to
     /// the importer's `torrent_hash IS NOT NULL` filter and never gets
-    /// cleaned up any other way — verified live as a real, permanent stuck
+    /// cleaned up any other way; verified live as a real, permanent stuck
     /// state before this was added).
     HashCaptureFailed,
     /// The release's title carries an explicit non-video format marker
-    /// (ebook, audiobook, comic) — a source returning something that merely
+    /// (ebook, audiobook, comic): a source returning something that merely
     /// shares a monitored show/movie's title text, not an actual episode or
     /// film. Checked before title-matching so these never reach the review
     /// queue at all (verified live: nyaa's RSS feed and TPB/1337x search
-    /// both surface this — a general torrent search or an unscoped feed has
+    /// both surface this: a general torrent search or an unscoped feed has
     /// no concept of "only video releases", so an ebook titled after a show
     /// embeds just as confidently as a real episode would).
     NonVideoFormat,
@@ -115,7 +115,7 @@ fn looks_like_episode(parsed: &ParsedRelease) -> bool {
 }
 
 /// True when a release's parsed markers indicate a whole-season or
-/// multi-episode batch torrent rather than a single episode — season
+/// multi-episode batch torrent rather than a single episode: season
 /// known, episode/absolute-episode deliberately left unresolved by the
 /// parser (see `parser::tokens::looks_like_episode_range`'s doc comment
 /// for why guessing one episode out of a batch is actively harmful).
@@ -126,7 +126,7 @@ fn looks_like_season_pack(parsed: &ParsedRelease) -> bool {
 /// Sort key for a batch of raw search results: season packs first (a pack
 /// clears every missing episode in one grab instead of one at a time, and
 /// each still goes through the normal seeder/quality gate in `process_item`
-/// — a pack with too few seeders is rejected there and iteration just falls
+/// a pack with too few seeders is rejected there and iteration just falls
 /// through to the next candidate, so this never trades a viable single
 /// episode for an unviable pack), highest-seeded first within each group.
 fn release_sort_key(item: &RawReleaseItem) -> (std::cmp::Reverse<bool>, std::cmp::Reverse<u32>) {
@@ -138,7 +138,7 @@ fn release_sort_key(item: &RawReleaseItem) -> (std::cmp::Reverse<bool>, std::cmp
 }
 
 /// True when a release's raw title carries an explicit non-video format
-/// marker — an ebook, audiobook, or comic that happens to share a
+/// marker: an ebook, audiobook, or comic that happens to share a
 /// monitored show/movie's title text, not an actual episode or film. A
 /// plain substring check on the raw (unparsed) title, deliberately upstream
 /// of the embedding matcher: these aren't "low-confidence" matches needing
@@ -161,7 +161,7 @@ fn looks_like_non_video_format(title: &str) -> bool {
     NON_VIDEO_MARKERS.iter().any(|m| upper.contains(m))
 }
 
-/// True when both years are known and differ by more than one — the
+/// True when both years are known and differ by more than one: the
 /// movie-world guard against a same-named-but-wrong film (e.g. "Dune" 1984
 /// vs. 2021). `None` on either side means "not enough signal to reject."
 fn movie_year_mismatch(parsed_year: Option<u32>, media_item_year: Option<i64>) -> bool {
@@ -174,7 +174,7 @@ fn movie_year_mismatch(parsed_year: Option<u32>, media_item_year: Option<i64>) -
 /// Movie counterpart to `find_monitored_missing_episode`: true when the
 /// movie is monitored, has no file yet, and isn't already mid-grab. Movies
 /// have no per-item "monitored" row the way episodes do (that lives on
-/// `media_item` itself), and no upgrade-after-file path — once a file
+/// `media_item` itself), and no upgrade-after-file path: once a file
 /// exists this permanently returns false, same as the TV path's `has_file`
 /// check.
 fn movie_needs_grab(conn: &Connection, media_item_id: i64) -> Result<bool> {
@@ -198,7 +198,7 @@ fn movie_needs_grab(conn: &Connection, media_item_id: i64) -> Result<bool> {
 }
 
 /// Upgrade-search counterpart to `movie_needs_grab`: same monitored/
-/// not-in-flight checks, but deliberately has no `has_file` gate — the
+/// not-in-flight checks, but deliberately has no `has_file` gate: the
 /// entire point of an upgrade check is to run against a movie that already
 /// has a file, so this is eligibility for a *re-grab*, not a first grab.
 fn movie_eligible_for_upgrade(conn: &Connection, media_item_id: i64) -> Result<bool> {
@@ -300,7 +300,7 @@ pub(crate) fn resolve_episode(
 }
 
 /// Looks up an episode by identity alone (no monitored/has_file
-/// eligibility filtering) — used by the season-pack importer, which is
+/// eligibility filtering): used by the season-pack importer, which is
 /// matching "what episode is this actual file" rather than "is this worth
 /// grabbing." `pub(crate)` so `importer` can reuse it instead of
 /// duplicating the same query.
@@ -343,7 +343,7 @@ fn find_monitored_missing_episode(
 }
 
 /// Upgrade-search counterpart to `find_monitored_missing_episode`: same
-/// monitored check, but deliberately has no `has_file` gate — see
+/// monitored check, but deliberately has no `has_file` gate; see
 /// `movie_eligible_for_upgrade`'s doc comment for why.
 fn find_monitored_episode(
     conn: &Connection,
@@ -388,7 +388,7 @@ fn count_monitored_missing_episodes_in_season(
 }
 
 /// Rough heuristic for whether a release's title indicates English audio,
-/// used only to gate obviously-wrong candidates pre-download — actual
+/// used only to gate obviously-wrong candidates pre-download: actual
 /// audio-track composition is only known for certain after download, which
 /// is where the real fix (remux, or reject) happens (Phase 8).
 fn infer_has_english_audio(title_raw: &str) -> bool {
@@ -416,7 +416,7 @@ fn best_existing_movie_score(conn: &Connection, media_item_id: i64) -> Result<Op
     .map_err(Into::into)
 }
 
-/// Season-pack counterpart to `best_existing_movie_score` — scoped by
+/// Season-pack counterpart to `best_existing_movie_score`: scoped by
 /// `season_number` (not just `episode_id IS NULL`, which a movie's own
 /// check relies on) because one TV media_item can have several *different*
 /// season packs' grab history, which `episode_id IS NULL` alone can't tell
@@ -444,8 +444,8 @@ fn best_existing_season_pack_score(
 /// already on disk isn't replaced over and over for score deltas too small
 /// to matter.
 /// Upgrade-search may auto-grab a better copy of something already owned.
-/// The review-queue approve handler cannot — it only runs the first-copy
-/// checks — so a NeedsReview match on an upgrade cycle must use those
+/// The review-queue approve handler cannot: it only runs the first-copy
+/// checks, so a NeedsReview match on an upgrade cycle must use those
 /// same first-copy checks or the TUI's `a` key 409s every time.
 fn use_upgrade_eligibility(upgrade_min_gain: Option<f32>, needs_review: bool) -> bool {
     upgrade_min_gain.is_some() && !needs_review
@@ -458,7 +458,7 @@ fn should_grab(new_score: f32, is_repack: bool, existing_best: Option<f32>, min_
     }
 }
 
-/// `category` here is qBittorrent's category, not `source`'s `kind` — kept
+/// `category` here is qBittorrent's category, not `source`'s `kind`: kept
 /// as its own parameter (rather than derived from `qbit_category` at the
 /// call site) so `torrent_fetch.category` always reflects what the torrent
 /// actually got added under, even if that config value changes later.
@@ -491,7 +491,7 @@ fn record_grab(
     )?;
     // Permanent audit trail, independent of whatever later happens to the
     // `release` row above (status changes, or the row/its media_item being
-    // deleted) — see `torrent_fetch`'s own doc comment in db.rs.
+    // deleted); see `torrent_fetch`'s own doc comment in db.rs.
     crate::db::record_torrent_fetch(
         conn,
         torrent_hash,
@@ -553,7 +553,7 @@ async fn process_item(
 
     // Whether this match needs a human's confirmation (queued for review)
     // or was confident enough to act on automatically, the show/season/
-    // episode/movie still has to actually need *something* first — a
+    // episode/movie still has to actually need *something* first: a
     // low-confidence title match against an already-complete show gains
     // nothing from a human's yes/no, it's just noise that reappears every
     // cycle the source keeps re-listing the same old release (verified
@@ -563,7 +563,7 @@ async fn process_item(
     // queue-for-review decision below, not only on the auto-grab path.
     if media_item.kind == "movie" {
         // A release carrying a season/episode/absolute-episode marker
-        // title-matched a movie by name alone — it's actually an episode
+        // title-matched a movie by name alone: it's actually an episode
         // of some same-named show, not this movie.
         if looks_like_episode(&parsed) {
             return Ok(ProcessOutcome::NoMatch);
@@ -573,7 +573,7 @@ async fn process_item(
         }
         // Review-queue approval only implements the first-copy path
         // (`movie_needs_grab`). An upgrade-cycle match that still needs a
-        // human would otherwise be queued and then 409 on approve — the
+        // human would otherwise be queued and then 409 on approve; the
         // live hestia queue was 139 already-owned movies for exactly this
         // reason. High-confidence auto-matches still use upgrade eligibility.
         let eligible = if use_upgrade_eligibility(upgrade_min_gain, needs_review) {
@@ -628,8 +628,8 @@ async fn process_item(
         is_season_pack: season_pack_number.is_some(),
     };
 
-    // Quality gates — including "reject sub-1080p when a 1080p+ alternative
-    // exists in this same batch" — apply before a candidate ever reaches a
+    // Quality gates, including "reject sub-1080p when a 1080p+ alternative
+    // exists in this same batch", apply before a candidate ever reaches a
     // human, not just on the confident auto-grab path. A human's review
     // decision is about whether this is genuinely the right show/season;
     // it was never meant to also be the place quality standards get
@@ -678,7 +678,7 @@ async fn process_item(
             // the episode/movie to be re-searched later with a different
             // candidate. A silent `Ok(MagnetRejected)` with nothing written
             // used to be indistinguishable from a real success once
-            // `mark_seen` ran — a since-fixed bug in the response-rejection
+            // `mark_seen` ran: a since-fixed bug in the response-rejection
             // check (see `qbit::add_torrent_response_is_rejected`'s doc
             // comment) made every nyaa URL-add hit this path even though
             // the torrent was actually downloading, so this arm went
@@ -706,7 +706,7 @@ async fn process_item(
 
     let Some(torrent_hash) = torrent_hash else {
         // The add almost certainly succeeded on qBittorrent's side, but we
-        // couldn't correlate which torrent it became — recording this as
+        // couldn't correlate which torrent it became: recording this as
         // `grabbed` with a NULL hash would strand it forever (see
         // `ProcessOutcome::HashCaptureFailed`'s doc comment), so it's
         // recorded as `failed` instead, freeing the episode/movie for a
@@ -763,16 +763,16 @@ const HASH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2
 /// back to its `release` row.
 ///
 /// `link` may be a detail-page URL rather than a directly-grabbable magnet
-/// (1337x search results only carry the former) — resolved here, right
+/// (1337x search results only carry the former): resolved here, right
 /// before the grab, so this stays a no-op for sources that are already
 /// directly grabbable (nyaa) and only costs a request for the one
 /// candidate actually being downloaded.
 ///
 /// Once resolved, a magnet link already carries its own infohash
-/// (`urn:btih:...`) — extracted directly, no need to ask qBittorrent at all.
+/// (`urn:btih:...`): extracted directly, no need to ask qBittorrent at all.
 /// Only nyaa's `.torrent`-URL links (not magnets) fall through to polling
 /// `torrents/info` for a newly-registered hash, which is both slower and
-/// inherently racy against any *other* concurrent add — `grab_lock`
+/// inherently racy against any *other* concurrent add: `grab_lock`
 /// serializes the whole add-and-correlate sequence across every caller
 /// (the background loop and the API's review-approve handler both add
 /// against the same category and can otherwise interleave, previously
@@ -785,7 +785,7 @@ async fn grab_and_capture_hash(
 ) -> Result<Option<String>> {
     let resolved;
     let link = if sources::scrape::needs_resolution(link) {
-        // No total timeout is reqwest's default — this runs inside the
+        // No total timeout is reqwest's default; this runs inside the
         // background loop while it holds the DB mutex, so a stalled
         // connection would hang the whole daemon.
         let client = reqwest::Client::builder()
@@ -870,13 +870,13 @@ pub async fn run_grab_cycle(
         }
 
         // Marked seen only on a deterministic verdict (matched-and-grabbed,
-        // no-match, needs-review, etc.) — never on `Err`, which is usually
+        // no-match, needs-review, etc.), never on `Err`, which is usually
         // transient (qbit momentarily unreachable, a stalled request). Guids
         // aren't re-emitted by a feed indefinitely, so leaving a failed item
         // unmarked just lets the next cycle retry it while it's still in
         // the source's window, rather than permanently losing it to a blip.
         // `false`: the RSS feed-watch path sees one item at a time as it
-        // streams in, with no batch of alternatives to compare against —
+        // streams in, with no batch of alternatives to compare against;
         // the low-resolution-alternative-exists gate only makes sense on
         // the search-driven path below, which fetches a whole candidate
         // list per target up front.
@@ -916,7 +916,7 @@ pub async fn run_grab_cycle(
 // general TV/movies, nyaa search for anime movies) ---
 //
 // Unlike the feed-based path above, there's no natural stream of "new"
-// items to dedup against — the recurring cost here is the *search itself*,
+// items to dedup against: the recurring cost here is the *search itself*,
 // repeated against the same monitored-but-missing catalog. `search_state`
 // tracks per-item search history so the same item isn't re-searched every
 // single cycle; cadence backs off exponentially (6h, 12h, 24h, 48h, 96h,
@@ -924,17 +924,17 @@ pub async fn run_grab_cycle(
 
 /// General-content fallbacks live-tested 2026-08-16 (TPB/apibay was
 /// timing out; every configured 1337x mirror returned Cloudflare 521):
-/// - **torrents-csv** and **YTS** (`yts.lt` API — `yts.mx` still does not
+/// - **torrents-csv** and **YTS** (`yts.lt` API; `yts.mx` still does not
 ///   resolve) are JSON hash-to-magnet sources, same grab shape as TPB.
 /// - **EZTV**'s JSON API is up but IMDb-id only; name search is a
-///   Cloudflare challenge. Not wired — breadarr has TMDB/TVDB, not IMDb.
+///   Cloudflare challenge. Not wired: breadarr has TMDB/TVDB, not IMDb.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SearchRoute {
-    /// Primary general-content (movies + non-anime TV) route — a JSON API,
+    /// Primary general-content (movies + non-anime TV) route: a JSON API,
     /// ranked by relevance rather than pure seeder count.
     Tpb,
     /// Kept wired in as a fallback for when TPB's own fetch fails outright
-    /// (not just "no relevant results") — the mirror-rotation/cooldown
+    /// (not just "no relevant results"); the mirror-rotation/cooldown
     /// machinery already built for it is real resilience worth keeping,
     /// just no longer the first choice given TPB's better precision.
     #[allow(dead_code)]
@@ -942,7 +942,7 @@ enum SearchRoute {
     NyaaSearch,
 }
 
-/// The search-driven sources plus their `source` table ids — one bundle
+/// The search-driven sources plus their `source` table ids: one bundle
 /// so `execute_search_targets` / `fetch_candidates` / the cycle runners
 /// don't each grow another four arguments every time a fallback is added.
 pub struct SearchSources<'a> {
@@ -962,12 +962,12 @@ pub struct SearchSources<'a> {
 pub struct SearchTarget {
     media_item_id: i64,
     episode_id: Option<i64>,
-    /// The target episode's season — `None` for a movie target. Lets
+    /// The target episode's season: `None` for a movie target. Lets
     /// `execute_search_targets` recognize a season-pack grab as having
     /// satisfied this target even though it has no single `episode_id`
     /// of its own.
     season_number: Option<u32>,
-    /// The target episode's number — `None` for a movie (or a season-pack
+    /// The target episode's number: `None` for a movie (or a season-pack
     /// target). Used so `better_resolution_available` only counts 1080p+
     /// results that are actually this episode (or a pack of this season),
     /// not a sibling's higher-res release.
@@ -975,18 +975,18 @@ pub struct SearchTarget {
     query: String,
     route: SearchRoute,
     /// Significant (len >= 4, alphanumeric) lowercased words from the
-    /// show/movie's own title — used to pre-filter obviously-irrelevant
+    /// show/movie's own title: used to pre-filter obviously-irrelevant
     /// search results before they ever reach the title matcher. 1337x's
     /// search does loose keyword matching, not phrase matching: a query
     /// for "Modern Family S00E01" surfaces "Family Guy" and "The Addams
     /// Family" at the top by seeder count, sharing only the generic word
-    /// "family" — without this filter those get fed straight into the
+    /// "family"; without this filter those get fed straight into the
     /// embedding matcher and, worse, can occasionally out-similarity a
     /// genuine but lower-quality result.
     title_words: Vec<String>,
     /// `None` for a normal missing-content target. `Some(gain)` marks this
     /// as an upgrade-search target for an episode/movie that already has a
-    /// file — `process_item` then looks the item up regardless of
+    /// file: `process_item` then looks the item up regardless of
     /// `has_file`/existing-file state, and a new candidate must beat the
     /// current best score by at least `gain` (repacks/propers still always
     /// supersede) rather than merely being strictly better.
@@ -1002,7 +1002,7 @@ fn significant_words(title: &str) -> Vec<String> {
 }
 
 /// True unless the target has at least one significant word (nothing to
-/// filter on — a one-or-two-short-word title lets everything through) and
+/// filter on (a one-or-two-short-word title lets everything through) and
 /// the candidate title is missing *any* of them. Requiring every word
 /// rather than a fraction is deliberately strict: the false positives seen
 /// in practice ("The First Purge" for a "...First Marriage" query) share
@@ -1017,7 +1017,7 @@ fn passes_relevance_filter(target_words: &[String], candidate_title: &str) -> bo
 }
 
 /// True when a title-relevant item in this batch is 1080p+ *for this
-/// target* — matching S/E, or a season pack of this season. A sibling
+/// target*: matching S/E, or a season pack of this season. A sibling
 /// episode's 1080p must not reject this episode's only 720p option.
 /// Movies: any title-relevant 1080p+ counts.
 fn better_resolution_available(target: &SearchTarget, items: &[RawReleaseItem]) -> bool {
@@ -1039,7 +1039,7 @@ fn better_resolution_available(target: &SearchTarget, items: &[RawReleaseItem]) 
     })
 }
 
-/// 1337x's search chokes on punctuation (colons, apostrophes) — replace
+/// 1337x's search chokes on punctuation (colons, apostrophes); replace
 /// anything that isn't alphanumeric/whitespace with a space and collapse.
 fn sanitize_query_text(s: &str) -> String {
     let cleaned: String = s
@@ -1055,7 +1055,7 @@ fn sanitize_query_text(s: &str) -> String {
     parser::WS_RE.replace_all(cleaned.trim(), " ").to_string()
 }
 
-/// TPB's search (apibay) does literal multi-term matching — appending an
+/// TPB's search (apibay) does literal multi-term matching: appending an
 /// "SxxEyy" token alongside a multi-word title routinely returns zero
 /// results even when genuine episodes for that exact season/episode exist
 /// and would surface from a plain title search (verified live: "Show Title
@@ -1082,16 +1082,16 @@ fn build_movie_query(title: &str, year: Option<i64>) -> String {
     }
 }
 
-/// SQL fragment (embedded inline, not a bind parameter — SQLite has no
+/// SQL fragment (embedded inline, not a bind parameter: SQLite has no
 /// syntax for parameterizing an expression) implementing the cadence
 /// formula: due immediately if never searched, otherwise `6h * 2^(count-1)`
 /// after the last attempt, capped at a week. The exponent itself is
 /// separately clamped to 10 (`6 * 2^10` hours is already ~4.7 years, far
-/// past the 168-hour outer cap) — SQLite integers are 64-bit signed, so an
+/// past the 168-hour outer cap): SQLite integers are 64-bit signed, so an
 /// uncapped `search_count` eventually overflows `1 << (search_count - 1)`
 /// into a negative number (verified in SQLite directly: happens at
 /// search_count=64) and `min(168, negative)` then picks the negative value,
-/// making `datetime(..., '+' || negative || ' hours')` land in the past —
+/// making `datetime(..., '+' || negative || ' hours')` land in the past:
 /// so a chronically failing target would silently flip from backing off
 /// weekly to being searched *every single cycle* instead, right when it
 /// should be backing off the most.
@@ -1099,7 +1099,7 @@ const DUE_CLAUSE: &str = "(last_searched_at IS NULL \
      OR datetime(last_searched_at, '+' || min(168, 6 * (1 << min(search_count - 1, 10))) || ' hours') <= datetime('now'))";
 
 /// Same exponential-backoff shape as `DUE_CLAUSE`, but with a much longer
-/// base (24h vs. 6h) and outer cap (30 days vs. 1 week) — there's no urgency
+/// base (24h vs. 6h) and outer cap (30 days vs. 1 week); there's no urgency
 /// to re-checking something that's already satisfied by a file on disk, so
 /// this cadence is deliberately slower than the missing-content one.
 const UPGRADE_DUE_CLAUSE: &str = "(last_checked_at IS NULL \
@@ -1107,14 +1107,14 @@ const UPGRADE_DUE_CLAUSE: &str = "(last_checked_at IS NULL \
 
 /// Enumerates up to `budget` monitored-but-missing items due for a search
 /// attempt, across both non-anime TV episodes and movies. Anime TV isn't
-/// included — it's already covered by the proven nyaa RSS feed watch, which
+/// included: it's already covered by the proven nyaa RSS feed watch, which
 /// carries no request-budget risk the way repeated searches do.
 ///
 /// Priority when there are more due candidates than budget: never-searched
 /// items first (so a newly added show/movie gets immediate coverage instead
 /// of starving behind a backlog of retries), then most-overdue-searched
 /// first. `Option<String>` sorts `None` before `Some` in Rust, which
-/// matches SQLite's own default NULLS-FIRST behavior for `ASC` — no manual
+/// matches SQLite's own default NULLS-FIRST behavior for `ASC`: no manual
 /// timestamp parsing needed to get this ordering right.
 fn enumerate_search_targets(conn: &Connection, budget: usize) -> Result<Vec<SearchTarget>> {
     let mut candidates: Vec<(SearchTarget, Option<String>, String)> = Vec::new();
@@ -1259,8 +1259,8 @@ fn enumerate_search_targets(conn: &Connection, budget: usize) -> Result<Vec<Sear
 }
 
 /// Upgrade-search counterpart to `enumerate_search_targets`: the mirror
-/// image query — `has_file = 1`/`EXISTS episode_file` instead of `= 0`/
-/// `NOT EXISTS`, joined against `upgrade_state` instead of `search_state` —
+/// image query: `has_file = 1`/`EXISTS episode_file` instead of `= 0`/
+/// `NOT EXISTS`, joined against `upgrade_state` instead of `search_state`,
 /// enumerating up to `budget` monitored-and-already-owned items due for an
 /// upgrade check. Anime TV is excluded for the same reason as the
 /// missing-content path: it's covered by the nyaa RSS feed watch instead.
@@ -1270,13 +1270,13 @@ fn enumerate_search_targets(conn: &Connection, budget: usize) -> Result<Vec<Sear
 /// more than a marginal amount (see `should_grab`).
 /// SQL fragment computing whether a file has any of the ground-truth
 /// `media_file_probe` problem signals worth prioritizing an upgrade check
-/// for — under-quality (probe-verified, not just what the release title
+/// for: under-quality (probe-verified, not just what the release title
 /// claimed), missing subtitles, a non-English default audio track (the
 /// at-import remux fix should normally catch this, but a pre-existing
 /// library file might predate it), or a probe/decode failure. `p` must be
 /// the table's alias in the query this is embedded in. A file with no probe
 /// row yet (still queued for the incremental probe sweep) reads as
-/// not-flagged rather than flagged — there's nothing to act on until it's
+/// not-flagged rather than flagged: there's nothing to act on until it's
 /// actually been probed.
 const NEEDS_ATTENTION_CLAUSE: &str = "(COALESCE(p.flag_under_quality, 0) = 1 \
      OR COALESCE(p.flag_no_subtitles, 0) = 1 \
@@ -1284,8 +1284,8 @@ const NEEDS_ATTENTION_CLAUSE: &str = "(COALESCE(p.flag_under_quality, 0) = 1 \
      OR COALESCE(p.corruption_status, '') IN ('probe_failed', 'decode_failed'))";
 
 /// Upgrade-search counterpart to `enumerate_search_targets`: the mirror
-/// image query — `has_file = 1`/`EXISTS episode_file` instead of `= 0`/
-/// `NOT EXISTS`, joined against `upgrade_state` instead of `search_state` —
+/// image query: `has_file = 1`/`EXISTS episode_file` instead of `= 0`/
+/// `NOT EXISTS`, joined against `upgrade_state` instead of `search_state`,
 /// enumerating up to `budget` monitored-and-already-owned items due for an
 /// upgrade check. Anime TV is excluded for the same reason as the
 /// missing-content path: it's covered by the nyaa RSS feed watch instead.
@@ -1449,7 +1449,7 @@ fn enumerate_upgrade_targets(
 
     candidates.sort_by(|a, b| {
         // `!needs_attention` first so `true` (flagged) sorts ahead of
-        // `false` — `bool`'s `Ord` puts `false < true`.
+        // `false`: `bool`'s `Ord` puts `false < true`.
         (!a.1)
             .cmp(&!b.1)
             .then_with(|| a.2.cmp(&b.2))
@@ -1501,7 +1501,7 @@ fn record_search_attempt(
 }
 
 /// Same upsert shape as `record_search_attempt`, against `upgrade_state`
-/// instead — kept as a separate table/function pair rather than adding an
+/// instead: kept as a separate table/function pair rather than adding an
 /// `is_upgrade` column to `search_state`, so the two due-ness cadences never
 /// interfere with each other's clock (see `upgrade_state`'s doc comment in
 /// db.rs).
@@ -1547,7 +1547,7 @@ fn record_upgrade_attempt(
 }
 
 /// Routes to `record_search_attempt` or `record_upgrade_attempt` based on
-/// which cadence `target` belongs to — lets `execute_search_targets` stay a
+/// which cadence `target` belongs to: lets `execute_search_targets` stay a
 /// single shared implementation for both the missing-content search cycle
 /// and the upgrade-search cycle.
 fn record_target_attempt(conn: &Connection, target: &SearchTarget, result: &str) -> Result<()> {
@@ -1565,13 +1565,13 @@ pub struct SearchCycleStats {
     pub errors: usize,
     pub queued_for_review: usize,
     /// Set when a source fetch failed outright (all mirrors down/cooling,
-    /// or two consecutive fetch errors this cycle) — the caller uses this
+    /// or two consecutive fetch errors this cycle): the caller uses this
     /// to trigger cycle-level backoff rather than tightening the search
     /// loop's own retry interval, which stays fixed.
     pub source_exhausted: bool,
 }
 
-/// Results are sorted by seeders and only the top N are evaluated — bounds
+/// Results are sorted by seeders and only the top N are evaluated: bounds
 /// both the title-matcher's per-item inference cost and how much noise a
 /// single broad query can dump into the review queue.
 const MAX_RESULTS_PER_SEARCH: usize = 15;
@@ -1607,7 +1607,7 @@ pub async fn run_upgrade_cycle(
 }
 
 /// Every currently-missing episode/movie for one specific `media_item`,
-/// ignoring the normal due-ness cadence and global budget — for a manual,
+/// ignoring the normal due-ness cadence and global budget: for a manual,
 /// explicitly-scoped one-off ("go find everything for this one show now"),
 /// not part of the recurring background loop, so the usual "don't re-search
 /// something too soon" throttling doesn't apply: there's nothing to
@@ -1716,7 +1716,7 @@ pub async fn execute_search_targets(
 
     let mut consecutive_fetch_errors = 0u32;
     // TPB queries are title-only (see `build_tv_query`), so every missing
-    // episode of the same show produces the *identical* query string —
+    // episode of the same show produces the *identical* query string;
     // without this, a 10-episode backlog fires 10 indistinguishable
     // requests at a single-domain API with no mirror fallback, which is
     // exactly the kind of pattern that gets a source rate-limited. Caches
@@ -1769,7 +1769,7 @@ pub async fn execute_search_targets(
         sorted.truncate(MAX_RESULTS_PER_SEARCH);
 
         // Computed once per target, over candidates that at least pass the
-        // cheap relevance pre-filter (not the full title-matcher — running
+        // cheap relevance pre-filter (not the full title-matcher, running
         // that here just to compute this flag would duplicate the real
         // matching `process_item` already does per-item below). Used to
         // decide whether a sub-1080p candidate is a real downgrade or the
@@ -1778,11 +1778,11 @@ pub async fn execute_search_targets(
 
         // A query built for one target's title can surface a *different*
         // monitored show/movie in its results (1337x's search isn't tightly
-        // scoped — related/similarly-tagged content shows up, e.g. "House
+        // scoped; related/similarly-tagged content shows up, e.g. "House
         // of the Dragon" search results including "Game of Thrones"
         // releases). `process_item` re-matches every result independently
         // and will correctly grab such an opportunistic hit if it's
-        // genuinely missing — that's a real bonus, not a bug — but only
+        // genuinely missing, that's a real bonus, not a bug, but only
         // grabbing *this specific target* should mark it satisfied and stop
         // the scan; otherwise the target is wrongly recorded as resolved
         // while its own release goes unevaluated, potentially forever if
@@ -1793,7 +1793,7 @@ pub async fn execute_search_targets(
                 continue;
             }
             // 1337x's search does loose keyword matching, not phrase
-            // matching — a query for a specific show/movie routinely
+            // matching: a query for a specific show/movie routinely
             // surfaces massively-seeded, completely unrelated top hits that
             // merely share one common word (see `passes_relevance_filter`).
             // Skip those before they reach the embedding matcher at all.
@@ -1815,7 +1815,7 @@ pub async fn execute_search_targets(
                 // `GateRejected` deliberately does not mark seen: the
                 // common real case is a release rejected today for too few
                 // seeders that climbs into viability by the next scheduled
-                // search — re-evaluating it costs nothing extra (it's
+                // search; re-evaluating it costs nothing extra (it's
                 // already in the response just fetched), but permanently
                 // skipping it would strand the item until a different
                 // release happens to appear.
@@ -1833,7 +1833,7 @@ pub async fn execute_search_targets(
                             // A season-pack grab has no single `episode_id`
                             // of its own, but it still satisfies this
                             // target if the target's own episode falls in
-                            // the season it covers — without this, the
+                            // the season it covers: without this, the
                             // search cycle wouldn't recognize the pack as
                             // having answered a single-episode search, and
                             // would keep re-searching (and potentially
@@ -1856,7 +1856,7 @@ pub async fn execute_search_targets(
                 Err(e) => {
                     tracing::warn!(error = %e, title = %item.title, "failed to process search result");
                     stats.errors += 1;
-                    // Not marked seen — same transient-failure reasoning as
+                    // Not marked seen: same transient-failure reasoning as
                     // the feed path (`run_grab_cycle`).
                 }
             }
@@ -1965,13 +1965,13 @@ async fn fetch_general_content(
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("all general-content sources failed")))
 }
 
-/// Fetches and scores (or gate-rejects) candidates for one search target —
+/// Fetches and scores (or gate-rejects) candidates for one search target:
 /// the same evaluation `execute_search_targets` does automatically, minus
 /// the grab decision, surfaced instead for a human to choose from. Used by
 /// the manual release picker: `episode_id` selects which of a media item's
 /// several possible targets (missing episodes, or the movie itself) to
 /// search for. Returns an empty list if there's no live target for that
-/// episode/movie right now (already owned, unmonitored, or mid-grab) —
+/// episode/movie right now (already owned, unmonitored, or mid-grab):
 /// same "nothing to do" cases `enumerate_search_targets_for_media_item`
 /// already excludes.
 pub async fn fetch_candidates(
@@ -2121,7 +2121,7 @@ fn grab_target_in_flight(
 
 /// Grabs a specific candidate a human picked from `fetch_candidates`'
 /// output, bypassing the score-vs-existing-best `should_grab` comparison
-/// entirely — a manual pick is an explicit override, not a competing
+/// entirely: a manual pick is an explicit override, not a competing
 /// automatic decision. Whether the chosen release is a season pack is
 /// re-derived from its own title rather than trusted from the candidate
 /// list (the two must agree by construction, but re-deriving here means
@@ -2154,14 +2154,14 @@ pub async fn grab_candidate(
         None
     };
     // Rebind to the episode the title actually names. Picking E06 while
-    // E05 is selected still grabs E06 — the TUI selection is last-resort
+    // E05 is selected still grabs E06: the TUI selection is last-resort
     // only (movies / unparsable titles).
     let final_episode_id = resolve_grab_episode(conn, &media_item, &parsed, episode_id)?;
     if grab_target_in_flight(conn, &media_item, final_episode_id, season_pack_number)? {
         anyhow::bail!("a grab is already in flight for this episode/movie");
     }
     // Real-time seeder data isn't available for a candidate picked from an
-    // earlier fetch — same `seeders=0` fallback `finalize_review_approval`
+    // earlier fetch; same `seeders=0` fallback `finalize_review_approval`
     // already uses for the same reason, and for the same reason it's still
     // real signal from resolution/source/codec/etc., not a meaningless
     // hardcoded score.
@@ -2224,7 +2224,7 @@ fn get_review_row(conn: &Connection, review_id: i64) -> Result<ReviewQueueRow> {
 pub struct PreparedApproval {
     pub media_item_id: i64,
     pub episode_id: Option<i64>,
-    /// Set only when this review item resolved to a season-pack grab — see
+    /// Set only when this review item resolved to a season-pack grab; see
     /// `release.season_number`'s own doc comment for why `episode_id IS
     /// NULL` alone can't disambiguate which season.
     pub season_number: Option<u32>,
@@ -2232,7 +2232,7 @@ pub struct PreparedApproval {
     pub raw_release_title: String,
     pub link: String,
     /// Computed from the parsed title with `seeders=0` (real-time seeder
-    /// data isn't available for a review-queue entry by approval time) —
+    /// data isn't available for a review-queue entry by approval time):
     /// still real signal from resolution/source/codec/etc., unlike the
     /// hardcoded `0.0` this replaced, which made *any* future automatic
     /// candidate with a nonzero score look like an upgrade over a release a
@@ -2250,7 +2250,7 @@ pub enum ApprovalPrep {
 
 /// Sync-only: reads everything needed to grab the reviewed release. Split
 /// from the actual grab (which needs `&QbitClient` and `.await`s) because a
-/// `rusqlite::Connection` isn't `Sync` — holding a reference to it across an
+/// `rusqlite::Connection` isn't `Sync`: holding a reference to it across an
 /// `.await` makes the enclosing future `!Send`, which axum's handler trait
 /// requires. Callers using a shared `Mutex<Connection>` (e.g. the HTTP API)
 /// must drop their lock guard between calling this and awaiting the grab.
@@ -2308,7 +2308,7 @@ pub fn prepare_review_approval(conn: &Connection, review_id: i64) -> Result<Appr
     let profile = load_quality_profile(conn, media_item.quality_profile_id, profile_kind)?;
     let score = scoring::score(&parsed, 0, parsed.has_hdr, &profile);
 
-    // Claimed atomically here, still under the caller's DB lock — a real
+    // Claimed atomically here, still under the caller's DB lock: a real
     // TOCTOU otherwise: the caller only checked `status == "pending"` above
     // (a plain read, not a claim), then drops the lock and does the actual
     // grab (~30s of network/qBittorrent I/O) before `finalize_review_approval`
@@ -2318,7 +2318,7 @@ pub fn prepare_review_approval(conn: &Connection, review_id: i64) -> Result<Appr
     // own `release`/`torrent_fetch` rows for it. Marking `approved` here
     // rather than waiting for `finalize_review_approval` closes that window;
     // `approved` at this point means "no longer available for a second
-    // approval attempt," not "successfully grabbed" — same distinction
+    // approval attempt," not "successfully grabbed": same distinction
     // `release.status` already draws between `grabbed` and `failed`, and if
     // the grab itself then errors outright, `release_review_claim` reverts
     // this back to `pending` (see its own doc comment).
@@ -2344,20 +2344,20 @@ pub fn prepare_review_approval(conn: &Connection, review_id: i64) -> Result<Appr
 }
 
 /// Releases a claim `prepare_review_approval` took when the grab itself
-/// then fails outright (a network/qBittorrent error — `Err` from
+/// then fails outright (a network/qBittorrent error, `Err` from
 /// `grab_prepared_approval`, not just a missing hash on an otherwise-ok add;
 /// see `finalize_review_approval`'s own handling for that case, which still
 /// runs to completion and records a `failed` release). Without this, an
 /// approval claimed just before a transient qBittorrent outage would be
 /// stuck `approved` forever with no `release`/`torrent_fetch` row to show
-/// for it — worse than the un-atomic version this replaced, which at least
+/// for it: worse than the un-atomic version this replaced, which at least
 /// left the row `pending` and retryable. Guarded on `WHERE status =
 /// 'approved'` mainly to no-op if the row somehow moved on already (e.g. a
 /// racing `reject`), not because `approved` distinguishes "merely claimed"
-/// from "successfully finalized" — it doesn't, `review_queue.status` has no
+/// from "successfully finalized": it doesn't, `review_queue.status` has no
 /// separate state for that. Safe in practice because a single request's
 /// grab either errors (this runs, nothing was ever finalized) or succeeds
-/// (`finalize_review_approval` runs instead, this never gets called) — the
+/// (`finalize_review_approval` runs instead, this never gets called): the
 /// two are mutually exclusive within one `approve()` call.
 pub fn release_review_claim(conn: &Connection, review_id: i64) -> Result<()> {
     conn.execute(
@@ -2367,7 +2367,7 @@ pub fn release_review_claim(conn: &Connection, review_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// The actual grab — network/qBittorrent I/O only, no `Connection` involved,
+/// The actual grab: network/qBittorrent I/O only, no `Connection` involved,
 /// safe to `.await` from anywhere.
 pub async fn grab_prepared_approval(
     qbit: &QbitClient,
@@ -2378,7 +2378,7 @@ pub async fn grab_prepared_approval(
 }
 
 /// Sync-only: records the grab. Call after [`grab_prepared_approval`]
-/// completes. Doesn't touch `review_queue.status` — `prepare_review_approval`
+/// completes. Doesn't touch `review_queue.status`: `prepare_review_approval`
 /// already claimed it into `approved` before the grab ran (see its doc
 /// comment).
 pub fn finalize_review_approval(
@@ -2406,7 +2406,7 @@ pub fn finalize_review_approval(
         &prepared.link,
         prepared.score,
         // No size available for a review-queue entry (the review row
-        // carries no size_bytes) — this is the one `record_grab` call site
+        // carries no size_bytes); this is the one `record_grab` call site
         // where `torrent_fetch.size_bytes` is legitimately NULL.
         None,
         qbit_category,
@@ -2510,7 +2510,7 @@ mod tests {
         assert!(episode_id.is_some());
     }
 
-    /// Two owned, monitored, equally-due episodes — one with a real
+    /// Two owned, monitored, equally-due episodes: one with a real
     /// probe-verified problem, one clean. A budget of 1 forces the ordering
     /// to matter: the flagged one must come back, not whichever happened to
     /// be inserted (or aired) first.
@@ -2586,7 +2586,7 @@ mod tests {
     fn enumerate_upgrade_targets_excludes_an_upgrade_locked_episode() {
         let conn = seeded_upgrade_conn_with_one_flagged_episode();
         // Episode 2 is the probe-flagged one that would otherwise sort
-        // first — lock it (as a completed local AV1 transcode would) and
+        // first: lock it (as a completed local AV1 transcode would) and
         // confirm it drops out entirely rather than just losing priority.
         conn.execute(
             "UPDATE episode_file SET upgrade_locked = 1 WHERE episode_id = 2",
@@ -2795,7 +2795,7 @@ mod tests {
     }
 
     // Regression test for a real gap found in review: `prepare_review_approval`
-    // used to only *read* `status == "pending"`, never claim it — two
+    // used to only *read* `status == "pending"`, never claim it: two
     // concurrent `approve()` calls (a double-click, or an HTTP client retry)
     // could both pass that check, both grab the same release, and both
     // write their own `release`/`torrent_fetch` rows. A second call for the
@@ -2809,7 +2809,7 @@ mod tests {
             prepare_review_approval(&conn, review_id).unwrap(),
             ApprovalPrep::Ready(_)
         ));
-        // Same review_id, called again before any grab or finalize ran —
+        // Same review_id, called again before any grab or finalize ran:
         // simulates the double-click/retry race.
         assert!(matches!(
             prepare_review_approval(&conn, review_id).unwrap(),
@@ -2828,7 +2828,7 @@ mod tests {
         ));
         release_review_claim(&conn, review_id).unwrap();
         // The claim was released (e.g. because the grab itself then errored
-        // outright) — a fresh approval attempt must be possible again.
+        // outright); a fresh approval attempt must be possible again.
         assert!(matches!(
             prepare_review_approval(&conn, review_id).unwrap(),
             ApprovalPrep::Ready(_)
@@ -2904,7 +2904,7 @@ mod tests {
         )
         .unwrap();
         // Unlike `movie_needs_grab`, having a file already doesn't disqualify
-        // an upgrade check — that's the whole point of the upgrade path.
+        // an upgrade check: that's the whole point of the upgrade path.
         assert!(movie_eligible_for_upgrade(&conn, 1).unwrap());
     }
 
@@ -3151,7 +3151,7 @@ mod tests {
     fn build_tv_query_is_title_only_for_tpb() {
         // apibay's search returns zero results once a season/episode token
         // is appended to a multi-word title, even when genuine matches for
-        // that exact episode exist under a plain title search — verified
+        // that exact episode exist under a plain title search; verified
         // live against real show data.
         assert_eq!(
             build_tv_query("Some Show", 4, 13, SearchRoute::Tpb),
@@ -3165,7 +3165,7 @@ mod tests {
         assert_eq!(build_movie_query("Arrival", None), "Arrival");
     }
 
-    /// A richer fixture than `seeded_conn`/`seeded_movie_conn` — covers both
+    /// A richer fixture than `seeded_conn`/`seeded_movie_conn`: covers both
     /// TV and movies at once, plus the specific rows each enumeration
     /// predicate needs to exclude.
     fn search_enumeration_conn() -> Connection {
@@ -3177,7 +3177,7 @@ mod tests {
         )
         .unwrap();
 
-        // A due, monitored, aired, non-anime episode — should be enumerated.
+        // A due, monitored, aired, non-anime episode: should be enumerated.
         conn.execute(
             "INSERT INTO media_item (id, kind, title, tvdb_id, monitored, quality_profile_id, root_folder)
              VALUES (1, 'series', 'Some Show', 111, 1, 1, '/tmp')",
@@ -3191,7 +3191,7 @@ mod tests {
         )
         .unwrap();
 
-        // An unaired episode of the same show — excluded.
+        // An unaired episode of the same show: excluded.
         conn.execute(
             "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file, air_date)
              VALUES (2, 1, 1, 2, 1, 0, '2999-01-01')",
@@ -3199,7 +3199,7 @@ mod tests {
         )
         .unwrap();
 
-        // An aired episode already mid-grab — excluded.
+        // An aired episode already mid-grab: excluded.
         conn.execute(
             "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file, air_date)
              VALUES (3, 1, 1, 3, 1, 0, '2020-01-01')",
@@ -3213,7 +3213,7 @@ mod tests {
         )
         .unwrap();
 
-        // An anime series — its missing episode is excluded (stays on nyaa RSS).
+        // An anime series: its missing episode is excluded (stays on nyaa RSS).
         conn.execute(
             "INSERT INTO media_item (id, kind, title, tvdb_id, monitored, quality_profile_id, root_folder)
              VALUES (2, 'series', 'Some Anime', 222, 1, 1, '/tmp')",
@@ -3240,7 +3240,7 @@ mod tests {
         )
         .unwrap();
 
-        // A movie already on disk — excluded.
+        // A movie already on disk: excluded.
         conn.execute(
             "INSERT INTO media_item (id, kind, title, year, tmdb_id, monitored, quality_profile_id, root_folder)
              VALUES (4, 'movie', 'Owned Movie', 2010, 444, 1, 2, '/tmp')",
@@ -3254,7 +3254,7 @@ mod tests {
         )
         .unwrap();
 
-        // An anime movie — routed to nyaa search instead of 1337x.
+        // An anime movie: routed to nyaa search instead of 1337x.
         conn.execute(
             "INSERT INTO media_item (id, kind, title, year, anidb_id, monitored, quality_profile_id, root_folder)
              VALUES (5, 'movie', 'Some Anime Movie', 2019, 555, 1, 2, '/tmp')",
@@ -3263,7 +3263,7 @@ mod tests {
         .unwrap();
 
         // An anime movie known only via `anime_tmdb_movie` (no anidb_id,
-        // not in `anime_mapping` either) — the case that was silently
+        // not in `anime_mapping` either): the case that was silently
         // broken before `anime_map::refresh` started reading the
         // Fribb dataset's `movie` id list (verified live: "Your Name"
         // routed to TPB instead of nyaa until this was fixed).
@@ -3363,7 +3363,7 @@ mod tests {
     fn record_search_attempt_is_due_again_only_after_cadence_elapses() {
         let conn = search_enumeration_conn();
 
-        // Freshly searched — cadence for a first attempt is 6h, so it must
+        // Freshly searched: cadence for a first attempt is 6h, so it must
         // not reappear immediately.
         record_search_attempt(&conn, 1, Some(1), "no_results").unwrap();
         let targets = enumerate_search_targets(&conn, 100).unwrap();
@@ -3390,7 +3390,7 @@ mod tests {
         // Regression test for a real SQLite integer overflow: uncapped,
         // `1 << (search_count - 1)` goes negative at search_count=64 (64-bit
         // signed shift), which flipped a chronically-failing target from
-        // "back off weekly" to "due every single cycle" — the opposite of
+        // "back off weekly" to "due every single cycle": the opposite of
         // the intended behavior, and worst exactly when backing off matters
         // most.
         let conn = search_enumeration_conn();

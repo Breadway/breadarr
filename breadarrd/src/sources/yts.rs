@@ -7,7 +7,7 @@ use super::{build_magnet, is_valid_info_hash, urlencode, RawReleaseItem, Release
 /// YTS movie API. `yts.mx` itself no longer resolves (checked 2026-07-12
 /// and again 2026-08-16); the `yts.lt` / `yts.am` hosts still serve the
 /// v2 JSON API, which is why the default URL is a working mirror rather
-/// than the brand domain. Movies only — each hit expands into one
+/// than the brand domain. Movies only: each hit expands into one
 /// `RawReleaseItem` per quality so the scorer sees 720p/1080p/2160p as
 /// distinct candidates, same as if they were separate TPB rows.
 pub struct YtsSource {
@@ -64,7 +64,7 @@ fn as_u32(n: Option<i64>) -> Option<u32> {
 }
 
 /// Builds a release title the existing parser can read quality/source/codec
-/// out of — YTS stores those as structured fields, not in `title`.
+/// out of; YTS stores those as structured fields, not in `title`.
 fn release_title(movie: &YtsMovie, torrent: &YtsTorrent) -> String {
     let mut title = movie.title.clone();
     if let Some(year) = movie.year {

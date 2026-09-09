@@ -12,7 +12,7 @@ impl JellyfinClient {
         Self {
             base_url: base_url.into(),
             api_key: api_key.into(),
-            // No total timeout is reqwest's default — fine for a one-shot
+            // No total timeout is reqwest's default: fine for a one-shot
             // debug command, but the daemon's background loop holds the DB
             // mutex across this call, so a stalled connection here would
             // hang the whole daemon indefinitely.
@@ -41,7 +41,7 @@ impl JellyfinClient {
     }
 
     /// Counts sessions Jellyfin is actively transcoding for right now (as
-    /// opposed to direct-play/direct-stream, which cost the GPU nothing) —
+    /// opposed to direct-play/direct-stream, which cost the GPU nothing):
     /// used to throttle the AV1 batch-transcode worker back so it doesn't
     /// contend with a real viewer for the same encode/decode engines.
     /// `TranscodingInfo` is only present on a session object while that

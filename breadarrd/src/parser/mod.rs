@@ -187,8 +187,8 @@ mod tests {
     #[test]
     fn parses_season_pack_shapes_without_literal_parens() {
         // Real review-queue entries that all failed to resolve at all
-        // before this fix — season came back None, not just unmatched
-        // episode — because SEASON_PACK_RE required a literal
+        // before this fix: season came back None, not just unmatched
+        // episode, because SEASON_PACK_RE required a literal
         // "(S?N Complete)" shape.
         assert_eq!(
             parse("Modern.Family.S10.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV").season,
@@ -239,13 +239,13 @@ mod tests {
 
     // Regression test for a real gap found in review: a date-named release
     // ("2024-01-15") got misread by `BARE_EPISODE_RANGE_RE` as an episode
-    // range — the 4-digit year is too many digits for `\d{1,3}` to match
+    // range; the 4-digit year is too many digits for `\d{1,3}` to match
     // whole, so its first real match starts at the month/day pair
     // ("01-15") instead, and `looks_like_episode_range` treats that as a
     // real range. Asserted directly against the tokenizer rather than
     // `parse()`, since a false-positive range and a genuine "no episode
     // marker at all" both surface identically as `None`/`None` on
-    // `ParsedRelease` — `looks_like_episode_range` returning `false` is the
+    // `ParsedRelease`: `looks_like_episode_range` returning `false` is the
     // actual fix being tested here.
     #[test]
     fn does_not_mistake_a_yyyy_mm_dd_date_for_an_episode_range() {
@@ -274,7 +274,7 @@ mod tests {
     }
 
     /// A batch of real, unmodified nyaa.si release titles pulled live
-    /// across several categories — not hand-picked for parseability. Not a
+    /// across several categories, not hand-picked for parseability. Not a
     /// correctness check (no ground truth for the messier CJK/bracket-only
     /// shapes), just a robustness net: parse() must never panic, and on
     /// the common WEB-DL/anime shapes it should extract *something*.
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn single_episode_dash_titles_are_unaffected_by_range_detection() {
         // A genuine single episode using dash notation must still resolve
-        // normally — only real ranges should be refused.
+        // normally: only real ranges should be refused.
         let p = parse("[SubsPlease] Some Show - 05 (1080p) [ABCD1234].mkv");
         assert_eq!(p.episode, Some(5));
         assert_eq!(p.absolute_episode, Some(5));
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn extracts_a_bare_year_from_a_scene_style_movie_name() {
         // Previously parsed as year=None entirely, since these releases
-        // never bracket the year — silently disabling movie_year_mismatch,
+        // never bracket the year: silently disabling movie_year_mismatch,
         // the only defense against a same-named-but-wrong film, on exactly
         // the naming convention TPB/1337x results actually use.
         let p = parse("Dune.1984.1080p.BluRay.x264-GROUP");
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn does_not_mistake_a_year_titled_movie_for_a_bare_year() {
-        // "1917" and "2012" are real movie titles — a bare year at the very
+        // "1917" and "2012" are real movie titles; a bare year at the very
         // start of the string must not be treated as a release year, or
         // the title would be mistaken for empty.
         let p = parse("1917 1080p BluRay x264-GROUP");
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn does_not_panic_on_unparsable_manga_release() {
-        // Not a video release at all — should degrade gracefully, not crash.
+        // Not a video release at all: should degrade gracefully, not crash.
         let p =
             parse("Aime ton prochain (01-06) (Chida) (2019) [Digital-1920] [Manga FR] (PapriKa+)");
         assert_eq!(p.year, Some(2019));

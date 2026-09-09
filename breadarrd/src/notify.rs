@@ -6,7 +6,7 @@ struct Payload<'a> {
     message: &'a str,
 }
 
-/// Best-effort push notification — failures are logged, never propagated.
+/// Best-effort push notification: failures are logged, never propagated.
 /// The events this fires for (a review-queue item, a run of import
 /// failures, the search loop halting) already have a durable home in
 /// `event_history`/the TUI; the notification is a convenience nudge on top
@@ -18,7 +18,7 @@ pub struct Notifier {
 }
 
 impl Notifier {
-    /// Returns `None` when `webhook_url` is empty — callers hold an
+    /// Returns `None` when `webhook_url` is empty: callers hold an
     /// `Option<Notifier>` and simply skip notifying rather than every call
     /// site needing its own empty-string check.
     pub fn new(webhook_url: &str) -> Option<Self> {

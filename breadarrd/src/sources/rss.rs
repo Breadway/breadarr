@@ -8,7 +8,7 @@ use super::{parse_human_size, urlencode, RawReleaseItem, ReleaseSource};
 
 /// RSS source for nyaa.si-style feeds, whose `nyaa:seeders`/`nyaa:leechers`/
 /// `nyaa:size` custom-namespaced fields carry the seeder data this project
-/// needs — generic feed libraries (e.g. feed-rs) don't surface arbitrary
+/// needs: generic feed libraries (e.g. feed-rs) don't surface arbitrary
 /// vendor namespaces, so this parses the raw XML directly.
 pub struct RssSource {
     feed_url: String,
@@ -19,7 +19,7 @@ impl RssSource {
     pub fn new(feed_url: impl Into<String>) -> Self {
         Self {
             feed_url: feed_url.into(),
-            // The background loop holds the DB mutex across this fetch — no
+            // The background loop holds the DB mutex across this fetch; no
             // total timeout (reqwest's default) means a stalled connection
             // hangs the whole daemon, not just this one request.
             client: reqwest::Client::builder()
@@ -39,7 +39,7 @@ impl ReleaseSource for RssSource {
     }
 }
 
-/// nyaa's search *is* its RSS feed with a `q` param appended — same
+/// nyaa's search *is* its RSS feed with a `q` param appended: same
 /// endpoint, same custom-namespace fields, so the parser needs no changes
 /// at all for search-driven use.
 fn build_search_url(feed_url: &str, query: Option<&str>) -> String {
@@ -68,7 +68,7 @@ struct ItemFields {
 
 /// Appends rather than overwrites title/link/guid: a real feed can split a
 /// single logical value across more than one `Text`/`CData` event for the
-/// same tag (mixed content, or just a parser buffer boundary) — a plain
+/// same tag (mixed content, or just a parser buffer boundary); a plain
 /// assignment would silently keep only the *last* fragment, truncating the
 /// value. `nyaa:seeders`/`nyaa:leechers`/`nyaa:size` stay parse-and-overwrite
 /// since they're short numeric/size tokens, not free text expected to span
@@ -112,14 +112,14 @@ fn parse_nyaa_rss(bytes: &[u8]) -> Result<Vec<RawReleaseItem>> {
                 let text = unescape(&raw)?.into_owned();
                 accumulate_field(&cur_tag, &text, &mut fields);
             }
-            // CDATA content is raw text by definition — XML entity escaping
+            // CDATA content is raw text by definition: XML entity escaping
             // doesn't apply inside a CDATA section (running `unescape()` on
             // it would misinterpret a literal "&amp;" as an escaped
             // ampersand), so this decodes without it. Many real-world feeds
             // wrap `<title>`/`<link>` in CDATA; previously only
             // `Event::Text` was handled at all, so those items silently
             // came back with `title = None` and were dropped at the
-            // `item`-close check below with zero error — pointing
+            // `item`-close check below with zero error, pointing
             // `nyaa_rss_url` at a CDATA-heavy feed yielded zero items, not
             // a visible failure.
             Event::CData(t) if in_item => {
@@ -189,7 +189,7 @@ mod tests {
     // wrap `<title>`/`<link>`/`<guid>` in CDATA rather than plain text
     // content (often to avoid having to XML-escape ampersands/brackets
     // common in release titles). Previously only `Event::Text` was
-    // handled — `Event::CData` was silently ignored — so every field
+    // handled: `Event::CData` was silently ignored, so every field
     // wrapped this way came back `None` and the whole item was dropped at
     // the `item`-close check with no error surfaced at all.
     #[test]
@@ -211,7 +211,7 @@ mod tests {
         let items = parse_nyaa_rss(CDATA_SAMPLE.as_bytes()).unwrap();
         assert_eq!(items.len(), 1, "a CDATA-wrapped item must not be silently dropped");
         let item = &items[0];
-        // A literal "&" survives verbatim — CDATA content isn't
+        // A literal "&" survives verbatim: CDATA content isn't
         // XML-entity-escaped, so this must NOT come back as "&amp;".
         assert_eq!(item.title, "[Group] Some Show & Friends - 05 [1080p]");
         assert_eq!(item.link, "https://nyaa.si/download/2130903.torrent");
@@ -243,7 +243,7 @@ mod tests {
         );
     }
 
-    /// Hits the real nyaa.si feed — not run by default. `cargo test -- --ignored`
+    /// Hits the real nyaa.si feed: not run by default. `cargo test -- --ignored`
     /// to sanity-check the parser against live markup if nyaa changes their format.
     #[tokio::test]
     #[ignore]
