@@ -21,7 +21,7 @@ use jellyfin::JellyfinClient;
 use metadata::tvdb::TvdbClient;
 use qbit::QbitClient;
 use rusqlite::Connection;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -699,6 +699,23 @@ async fn background_loop(
                     }
                     Ok(_) => {}
                     Err(e) => error!(error = %e, "media probe sweep failed"),
+                }
+                // Also in the same tick: catch review-queue rows the
+                // search/upgrade cycles have quietly outrun since the last
+                // pass, before a human hits them and gets a confusing
+                // error on approve.
+                let prune_result = {
+                    let conn = conn.lock().await;
+                    scheduler::prune_stale_review_queue(&conn)
+                };
+                match prune_result {
+                    Ok(outcome) if outcome.pruned > 0 => {
+                        info!(?outcome, "pruned stale review-queue entries");
+                    }
+                    Ok(outcome) => {
+                        debug!(checked = outcome.checked, "review-queue prune found nothing stale");
+                    }
+                    Err(e) => error!(error = %e, "stale review-queue prune failed"),
                 }
             }
             Some(req) = background_rx.recv() => {

@@ -2248,6 +2248,65 @@ pub enum ApprovalPrep {
     NotMonitoredOrAlreadyHave,
 }
 
+/// Whether a review-queue candidate still names an episode/movie that
+/// actually needs a grab, re-running the same eligibility logic
+/// `process_item` applies before ever queuing the row in the first place.
+/// Shared between [`prepare_review_approval`] (approval-time check) and
+/// [`prune_stale_review_queue`] (periodic re-check of every pending row) so
+/// the two can't drift apart.
+enum ReviewEligibility {
+    Eligible {
+        episode_id: Option<i64>,
+        season_number: Option<u32>,
+    },
+    CouldNotResolveEpisode,
+    NotMonitoredOrAlreadyHave,
+}
+
+fn resolve_review_eligibility(
+    conn: &Connection,
+    media_item: &MediaItemRow,
+    parsed: &ParsedRelease,
+) -> Result<ReviewEligibility> {
+    if media_item.kind == "movie" {
+        if looks_like_episode(parsed) {
+            return Ok(ReviewEligibility::CouldNotResolveEpisode);
+        }
+        if movie_year_mismatch(parsed.year, media_item.year) {
+            return Ok(ReviewEligibility::CouldNotResolveEpisode);
+        }
+        if !movie_needs_grab(conn, media_item.id)? {
+            return Ok(ReviewEligibility::NotMonitoredOrAlreadyHave);
+        }
+        return Ok(ReviewEligibility::Eligible {
+            episode_id: None,
+            season_number: None,
+        });
+    }
+    if looks_like_season_pack(parsed) {
+        let Some(season) = parsed.season else {
+            return Ok(ReviewEligibility::CouldNotResolveEpisode);
+        };
+        if count_monitored_missing_episodes_in_season(conn, media_item.id, season)? == 0 {
+            return Ok(ReviewEligibility::NotMonitoredOrAlreadyHave);
+        }
+        return Ok(ReviewEligibility::Eligible {
+            episode_id: None,
+            season_number: Some(season),
+        });
+    }
+    let Some((season, episode)) = resolve_episode(conn, media_item.tvdb_id, parsed)? else {
+        return Ok(ReviewEligibility::CouldNotResolveEpisode);
+    };
+    let Some(eid) = find_monitored_missing_episode(conn, media_item.id, season, episode)? else {
+        return Ok(ReviewEligibility::NotMonitoredOrAlreadyHave);
+    };
+    Ok(ReviewEligibility::Eligible {
+        episode_id: Some(eid),
+        season_number: None,
+    })
+}
+
 /// Sync-only: reads everything needed to grab the reviewed release. Split
 /// from the actual grab (which needs `&QbitClient` and `.await`s) because a
 /// `rusqlite::Connection` isn't `Sync`: holding a reference to it across an
@@ -2268,37 +2327,19 @@ pub fn prepare_review_approval(conn: &Connection, review_id: i64) -> Result<Appr
     let media_item = get_media_item(conn, media_item_id)?;
     let parsed = parser::parse(&row.raw_release_title);
 
-    let mut episode_id: Option<i64> = None;
-    let mut season_pack_number: Option<u32> = None;
-
-    if media_item.kind == "movie" {
-        if looks_like_episode(&parsed) {
-            return Ok(ApprovalPrep::CouldNotResolveEpisode);
-        }
-        if movie_year_mismatch(parsed.year, media_item.year) {
-            return Ok(ApprovalPrep::CouldNotResolveEpisode);
-        }
-        if !movie_needs_grab(conn, media_item.id)? {
-            return Ok(ApprovalPrep::NotMonitoredOrAlreadyHave);
-        }
-    } else if looks_like_season_pack(&parsed) {
-        let Some(season) = parsed.season else {
-            return Ok(ApprovalPrep::CouldNotResolveEpisode);
+    let (episode_id, season_pack_number) =
+        match resolve_review_eligibility(conn, &media_item, &parsed)? {
+            ReviewEligibility::CouldNotResolveEpisode => {
+                return Ok(ApprovalPrep::CouldNotResolveEpisode)
+            }
+            ReviewEligibility::NotMonitoredOrAlreadyHave => {
+                return Ok(ApprovalPrep::NotMonitoredOrAlreadyHave)
+            }
+            ReviewEligibility::Eligible {
+                episode_id,
+                season_number,
+            } => (episode_id, season_number),
         };
-        if count_monitored_missing_episodes_in_season(conn, media_item.id, season)? == 0 {
-            return Ok(ApprovalPrep::NotMonitoredOrAlreadyHave);
-        }
-        season_pack_number = Some(season);
-    } else {
-        let Some((season, episode)) = resolve_episode(conn, media_item.tvdb_id, &parsed)? else {
-            return Ok(ApprovalPrep::CouldNotResolveEpisode);
-        };
-        let Some(eid) = find_monitored_missing_episode(conn, media_item.id, season, episode)?
-        else {
-            return Ok(ApprovalPrep::NotMonitoredOrAlreadyHave);
-        };
-        episode_id = Some(eid);
-    }
 
     let profile_kind = if media_item.kind == "movie" {
         ProfileKind::Movie
@@ -2422,6 +2463,69 @@ pub fn reject_review(conn: &Connection, review_id: i64) -> Result<bool> {
         params![review_id],
     )?;
     Ok(rows > 0)
+}
+
+#[derive(Debug, Default)]
+pub struct StaleReviewPrune {
+    pub checked: usize,
+    pub pruned: usize,
+}
+
+/// Re-checks every still-pending review-queue row against the same
+/// eligibility logic `process_item` applies before queuing it and
+/// `prepare_review_approval` applies on approve, auto-rejecting any row
+/// whose episode/movie the background search/upgrade pipeline has since
+/// satisfied through an unrelated, higher-confidence release. Without this,
+/// eligibility was only ever checked at insert time and at approval time,
+/// with nothing in between: a row could sit `pending` for hours after the
+/// episode it named was already grabbed elsewhere, only to fail with a
+/// confusing 409/422 the one time a human finally reviewed it (verified
+/// live: almost the entire queue failing on approval, repeatedly, since the
+/// pipeline ticks far more often than anyone checks the review queue).
+///
+/// Rows are marked `rejected` with `stale_reason` set, not deleted, so
+/// they stay visible in history and distinguishable from a genuine human
+/// rejection (`stale_reason IS NULL`). A row with no `candidate_media_item_id`
+/// at all is left alone: `prepare_review_approval` already permanently
+/// 422s those (`MissingGrabData`), and that isn't a staleness question, it
+/// never had a target to go stale against.
+pub fn prune_stale_review_queue(conn: &Connection) -> Result<StaleReviewPrune> {
+    let mut stmt = conn.prepare(
+        "SELECT id, raw_release_title, candidate_media_item_id
+         FROM review_queue WHERE status = 'pending'",
+    )?;
+    let rows: Vec<(i64, String, Option<i64>)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    let mut outcome = StaleReviewPrune {
+        checked: rows.len(),
+        pruned: 0,
+    };
+    for (id, raw_release_title, media_item_id) in rows {
+        let Some(media_item_id) = media_item_id else {
+            continue;
+        };
+        let media_item = get_media_item(conn, media_item_id)?;
+        let parsed = parser::parse(&raw_release_title);
+        let reason = match resolve_review_eligibility(conn, &media_item, &parsed)? {
+            ReviewEligibility::Eligible { .. } => continue,
+            ReviewEligibility::CouldNotResolveEpisode => {
+                "could not resolve episode (library renumbered or resolved elsewhere)"
+            }
+            ReviewEligibility::NotMonitoredOrAlreadyHave => {
+                "episode/movie already satisfied by another release"
+            }
+        };
+        let updated = conn.execute(
+            "UPDATE review_queue SET status = 'rejected', stale_reason = ?2
+             WHERE id = ?1 AND status = 'pending'",
+            params![id, reason],
+        )?;
+        outcome.pruned += updated;
+    }
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -2854,6 +2958,67 @@ mod tests {
         assert!(matches!(
             prepare_review_approval(&conn, review_id).unwrap(),
             ApprovalPrep::CouldNotResolveEpisode
+        ));
+    }
+
+    #[test]
+    fn prune_stale_review_queue_leaves_an_eligible_row_pending() {
+        let conn = seeded_movie_conn();
+        let review_id = insert_pending_review(&conn, "Some Movie 2016 1080p BluRay x264");
+
+        let outcome = prune_stale_review_queue(&conn).unwrap();
+        assert_eq!(outcome.checked, 1);
+        assert_eq!(outcome.pruned, 0);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM review_queue WHERE id = ?1",
+                params![review_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+    }
+
+    // Regression test for the actual bug: a review-queue row is queued for
+    // one release, but by the time a human gets to approve it the movie has
+    // already been grabbed through an unrelated, higher-confidence path
+    // (auto-match, manual grab, whatever). Nothing previously re-checked
+    // eligibility between insert time and approval time, so the row just sat
+    // `pending` until approval failed with a confusing 409. The periodic
+    // prune must catch this proactively instead.
+    #[test]
+    fn prune_stale_review_queue_rejects_a_row_whose_movie_was_satisfied_elsewhere() {
+        let conn = seeded_movie_conn();
+        let review_id = insert_pending_review(&conn, "Some Movie 2016 1080p BluRay x264");
+
+        conn.execute(
+            "INSERT INTO episode_file (media_item_id, episode_id, path, size_bytes)
+             VALUES (1, NULL, '/tmp/movie.mkv', 100)",
+            [],
+        )
+        .unwrap();
+
+        let outcome = prune_stale_review_queue(&conn).unwrap();
+        assert_eq!(outcome.checked, 1);
+        assert_eq!(outcome.pruned, 1);
+
+        let (status, stale_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, stale_reason FROM review_queue WHERE id = ?1",
+                params![review_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "rejected");
+        assert!(stale_reason.is_some());
+
+        // Now stale, so a human hitting approve must not get the raw 409
+        // this bug used to produce: prepare_review_approval sees the row is
+        // no longer pending at all.
+        assert!(matches!(
+            prepare_review_approval(&conn, review_id).unwrap(),
+            ApprovalPrep::NotPending
         ));
     }
 
