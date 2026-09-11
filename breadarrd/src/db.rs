@@ -480,6 +480,14 @@ pub fn init(conn: &Connection) -> anyhow::Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
 
+    // Set by `scheduler::prune_stale_review_queue` when it auto-rejects a
+    // pending row whose episode/movie was satisfied by the background
+    // pipeline before a human got to it — distinguishes an auto-prune from
+    // a genuine human rejection (same `status = 'rejected'` value, since the
+    // CHECK constraint on `review_queue.status` isn't worth a table rebuild
+    // to extend for this). NULL for every row rejected by an actual human.
+    add_column_if_missing(conn, "review_queue", "stale_reason", "TEXT")?;
+
     ensure_indexes(conn)?;
 
     Ok(())
