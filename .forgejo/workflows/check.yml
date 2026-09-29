@@ -13,7 +13,6 @@ name: check
 on:
   push:
     branches: ['feature/**', 'fix/**', 'main']
-  pull_request:
 
 jobs:
   check:

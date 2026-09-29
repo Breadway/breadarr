@@ -1,0 +1,3 @@
+# Extra pacman packages for the shared CI image (see bread-ecosystem ci/build.sh).
+# breadarr shells out to ffprobe/ffmpeg, and its importer tests run them.
+ffmpeg
