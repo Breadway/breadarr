@@ -34,7 +34,14 @@ impl RssSource {
 impl ReleaseSource for RssSource {
     async fn fetch(&self, query: Option<&str>) -> Result<Vec<RawReleaseItem>> {
         let url = build_search_url(&self.feed_url, query);
-        let bytes = self.client.get(&url).send().await?.bytes().await?;
+        let bytes = self
+            .client
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
         parse_nyaa_rss(&bytes)
     }
 }
@@ -46,7 +53,7 @@ fn build_search_url(feed_url: &str, query: Option<&str>) -> String {
     match query {
         Some(q) => {
             let sep = if feed_url.contains('?') { '&' } else { '?' };
-            format!("{feed_url}{sep}q={}", urlencode(q))
+            format!("{feed_url}{sep}q={}&s=seeders&o=desc", urlencode(q))
         }
         None => feed_url.to_string(),
     }
@@ -223,7 +230,7 @@ mod tests {
     fn build_search_url_appends_query_param() {
         assert_eq!(
             build_search_url("https://nyaa.si/?page=rss&c=1_2", Some("Some Movie 2016")),
-            "https://nyaa.si/?page=rss&c=1_2&q=Some%20Movie%202016"
+            "https://nyaa.si/?page=rss&c=1_2&q=Some%20Movie%202016&s=seeders&o=desc"
         );
     }
 
@@ -231,7 +238,7 @@ mod tests {
     fn build_search_url_handles_a_feed_url_with_no_existing_query_string() {
         assert_eq!(
             build_search_url("https://nyaa.si/rss", Some("Some Movie")),
-            "https://nyaa.si/rss?q=Some%20Movie"
+            "https://nyaa.si/rss?q=Some%20Movie&s=seeders&o=desc"
         );
     }
 

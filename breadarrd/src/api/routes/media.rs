@@ -117,6 +117,25 @@ pub async fn add(
     // Fetch before taking the lock: a sync MutexGuard can't be held across
     // an `.await` point.
     let episodes = tvdb.episodes(&req.tvdb_id).await.map_err(internal)?;
+    // The TUI only sends the selected title. Recover TVDB aliases so
+    // English and original-language releases can both match this series.
+    let mut aliases = req.aliases.clone();
+    match tvdb.search_series(&req.title).await {
+        Ok(results) => {
+            if let Some(series) = results.into_iter().find(|r| r.external_id == req.tvdb_id) {
+                for alias in series
+                    .aliases
+                    .into_iter()
+                    .chain(std::iter::once(series.name))
+                {
+                    if alias != req.title && !aliases.contains(&alias) {
+                        aliases.push(alias);
+                    }
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "could not fetch series aliases"),
+    }
 
     let media_item_id = {
         let conn = state.conn.lock().await;
@@ -125,7 +144,7 @@ pub async fn add(
             &req.tvdb_id,
             &req.title,
             req.year.map(|y| y as u32),
-            &req.aliases,
+            &aliases,
             &root_folder,
             1,
             &episodes,

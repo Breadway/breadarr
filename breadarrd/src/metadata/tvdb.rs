@@ -16,6 +16,39 @@ pub struct TvdbClient {
     token: Mutex<Option<(String, Instant)>>,
 }
 
+#[derive(Deserialize)]
+struct SearchItem {
+    tvdb_id: Option<String>,
+    name: Option<String>,
+    year: Option<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    translations: std::collections::HashMap<String, String>,
+}
+
+impl SearchItem {
+    fn into_result(self) -> Option<SeriesSearchResult> {
+        let original = self.name?;
+        let name = self
+            .translations
+            .get("eng")
+            .filter(|name| !name.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| original.clone());
+        let mut aliases = self.aliases;
+        if name != original && !aliases.contains(&original) {
+            aliases.push(original);
+        }
+        Some(SeriesSearchResult {
+            external_id: self.tvdb_id?,
+            name,
+            year: self.year.and_then(|y| y.parse().ok()),
+            aliases,
+        })
+    }
+}
+
 impl TvdbClient {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
@@ -72,14 +105,6 @@ impl TvdbClient {
         struct SearchResponse {
             data: Vec<SearchItem>,
         }
-        #[derive(Deserialize)]
-        struct SearchItem {
-            tvdb_id: Option<String>,
-            name: Option<String>,
-            year: Option<String>,
-            #[serde(default)]
-            aliases: Vec<String>,
-        }
 
         let resp: SearchResponse = self
             .client
@@ -98,14 +123,7 @@ impl TvdbClient {
         Ok(resp
             .data
             .into_iter()
-            .filter_map(|item| {
-                Some(SeriesSearchResult {
-                    external_id: item.tvdb_id?,
-                    name: item.name?,
-                    year: item.year.and_then(|y| y.parse().ok()),
-                    aliases: item.aliases,
-                })
-            })
+            .filter_map(SearchItem::into_result)
             .collect())
     }
 
@@ -183,5 +201,32 @@ impl TvdbClient {
                 air_date: e.aired,
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_english_translation_and_preserves_original_name() {
+        let item: SearchItem = serde_json::from_value(serde_json::json!({
+            "tvdb_id": "293088", "name": "ワンパンマン", "year": "2015",
+            "translations": {"eng": "One Punch Man"}, "aliases": ["One-Punch Man"]
+        }))
+        .unwrap();
+        let result = item.into_result().unwrap();
+        assert_eq!(result.name, "One Punch Man");
+        assert!(result.aliases.contains(&"ワンパンマン".to_string()));
+        assert!(result.aliases.contains(&"One-Punch Man".to_string()));
+    }
+
+    #[test]
+    fn falls_back_to_original_without_english_translation() {
+        let item: SearchItem = serde_json::from_value(serde_json::json!({
+            "tvdb_id": "1", "name": "Original", "translations": {"eng": ""}
+        }))
+        .unwrap();
+        assert_eq!(item.into_result().unwrap().name, "Original");
     }
 }

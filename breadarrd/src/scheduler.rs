@@ -1069,7 +1069,8 @@ fn sanitize_query_text(s: &str) -> String {
 fn build_tv_query(title: &str, season: i64, episode: i64, route: SearchRoute) -> String {
     match route {
         SearchRoute::Tpb => sanitize_query_text(title),
-        SearchRoute::X1337 | SearchRoute::NyaaSearch => {
+        SearchRoute::NyaaSearch => format!("{} S{season:02}", sanitize_query_text(title)),
+        SearchRoute::X1337 => {
             format!("{} S{season:02}E{episode:02}", sanitize_query_text(title))
         }
     }
@@ -1658,6 +1659,21 @@ pub fn enumerate_search_targets_for_media_item(
         }]);
     }
 
+    let tvdb_id: Option<i64> = conn.query_row(
+        "SELECT tvdb_id FROM media_item WHERE id = ?1",
+        params![media_item_id],
+        |row| row.get(0),
+    )?;
+    let route = if tvdb_id
+        .map(|id| is_anime(conn, id))
+        .transpose()?
+        .unwrap_or(false)
+    {
+        SearchRoute::NyaaSearch
+    } else {
+        SearchRoute::Tpb
+    };
+
     let mut stmt = conn.prepare(
         "SELECT e.id, m.title, e.season_number, e.episode_number
          FROM episode e
@@ -1683,9 +1699,9 @@ pub fn enumerate_search_targets_for_media_item(
             episode_id: Some(episode_id),
             season_number: Some(season as u32),
             episode_number: Some(episode as u32),
-            query: build_tv_query(&title, season, episode, SearchRoute::Tpb),
+            query: build_tv_query(&title, season, episode, route),
             title_words: significant_words(&title),
-            route: SearchRoute::Tpb,
+            route,
             upgrade_min_gain: None,
         })
         .collect())
@@ -1896,10 +1912,19 @@ async fn fetch_for_target(
     sources: &SearchSources<'_>,
 ) -> Result<(Vec<RawReleaseItem>, i64)> {
     match target.route {
-        SearchRoute::NyaaSearch => Ok((
-            sources.nyaa_search.fetch(Some(&target.query)).await?,
-            sources.nyaa_id,
-        )),
+        SearchRoute::NyaaSearch => {
+            let mut items = sources.nyaa_search.fetch(Some(&target.query)).await?;
+            // Absolute-numbered releases often omit the season marker.
+            if items.is_empty() && target.episode_id.is_some() {
+                let title = target
+                    .query
+                    .rsplit_once(" S")
+                    .map(|(title, _)| title)
+                    .unwrap_or(&target.query);
+                items = sources.nyaa_search.fetch(Some(title)).await?;
+            }
+            Ok((items, sources.nyaa_id))
+        }
         SearchRoute::X1337 => Ok((
             sources.scrape.fetch(Some(&target.query)).await?,
             sources.scrape_id,
@@ -3462,6 +3487,19 @@ mod tests {
             !targets.iter().any(|t| t.episode_id == Some(4)),
             "anime episode should be excluded"
         );
+    }
+
+    #[test]
+    fn manual_anime_search_uses_nyaa_without_episode_suffix() {
+        let conn = search_enumeration_conn();
+        let targets = enumerate_search_targets_for_media_item(&conn, 2).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].route, SearchRoute::NyaaSearch);
+        assert_eq!(targets[0].query, "Some Anime S01");
+        assert_eq!(targets[0].season_number, Some(1));
+        assert_eq!(targets[0].episode_number, Some(1));
+        let regular = enumerate_search_targets_for_media_item(&conn, 1).unwrap();
+        assert_eq!(regular[0].route, SearchRoute::Tpb);
     }
 
     #[test]
