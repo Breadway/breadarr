@@ -1016,6 +1016,24 @@ fn passes_relevance_filter(target_words: &[String], candidate_title: &str) -> bo
     target_words.iter().all(|w| lower.contains(w.as_str()))
 }
 
+/// Keep the requested episode or season pack ahead of sibling releases
+/// before applying the result cap. Unnumbered results retain their place
+/// so absolute-numbered anime releases still reach episode resolution.
+fn release_matches_target(target: &SearchTarget, item: &RawReleaseItem) -> bool {
+    if !passes_relevance_filter(&target.title_words, &item.title) {
+        return false;
+    }
+    let Some(season) = target.season_number else {
+        return true;
+    };
+    let parsed = parser::parse(&item.title);
+    if parsed.season.is_none() {
+        return true;
+    }
+    parsed.season == Some(season)
+        && (looks_like_season_pack(&parsed) || parsed.episode == target.episode_number)
+}
+
 /// True when a title-relevant item in this batch is 1080p+ *for this
 /// target*: matching S/E, or a season pack of this season. A sibling
 /// episode's 1080p must not reject this episode's only 720p option.
@@ -1026,7 +1044,7 @@ fn better_resolution_available(target: &SearchTarget, items: &[RawReleaseItem]) 
             return false;
         }
         let parsed = parser::parse(&item.title);
-        if !parsed.resolution.is_some_and(|r| r >= 1080) {
+        if parsed.resolution.is_none_or(|r| r < 1080) {
             return false;
         }
         if target.season_number.is_none() {
@@ -1055,20 +1073,12 @@ fn sanitize_query_text(s: &str) -> String {
     parser::WS_RE.replace_all(cleaned.trim(), " ").to_string()
 }
 
-/// TPB's search (apibay) does literal multi-term matching: appending an
-/// "SxxEyy" token alongside a multi-word title routinely returns zero
-/// results even when genuine episodes for that exact season/episode exist
-/// and would surface from a plain title search (verified live: "Show Title
-/// S01E01" → zero results, "Show Title" alone → real S01E13/E14/E15 results
-/// a few rows down). So TPB gets a title-only query; `process_item` already
-/// parses season/episode back out of each *result's* own title via
-/// `parser::parse`, so nothing about episode identification depends on the
-/// query carrying it. 1337x (still reachable as TPB's fetch-failure
-/// fallback) keeps the season/episode suffix, since it doesn't share this
-/// failure mode and the extra scoping helps there.
+/// Scope TPB queries to a season, without an episode token. Title-only
+/// queries can fill the result cap with other seasons or a newer spinoff;
+/// exact episode queries miss season packs and have poor recall on TPB.
 fn build_tv_query(title: &str, season: i64, episode: i64, route: SearchRoute) -> String {
     match route {
-        SearchRoute::Tpb => sanitize_query_text(title),
+        SearchRoute::Tpb => format!("{} S{season:02}", sanitize_query_text(title)),
         SearchRoute::NyaaSearch => format!("{} S{season:02}", sanitize_query_text(title)),
         SearchRoute::X1337 => {
             format!("{} S{season:02}E{episode:02}", sanitize_query_text(title))
@@ -1731,8 +1741,8 @@ pub async fn execute_search_targets(
     };
 
     let mut consecutive_fetch_errors = 0u32;
-    // TPB queries are title-only (see `build_tv_query`), so every missing
-    // episode of the same show produces the *identical* query string;
+    // TPB queries share a season scope (see `build_tv_query`), so every missing
+    // episode of the same season produces the same query string;
     // without this, a 10-episode backlog fires 10 indistinguishable
     // requests at a single-domain API with no mirror fallback, which is
     // exactly the kind of pattern that gets a source rate-limited. Caches
@@ -1781,7 +1791,12 @@ pub async fn execute_search_targets(
             };
 
         let mut sorted = items;
-        sorted.sort_by_key(release_sort_key);
+        sorted.sort_by_key(|item| {
+            (
+                std::cmp::Reverse(release_matches_target(target, item)),
+                release_sort_key(item),
+            )
+        });
         sorted.truncate(MAX_RESULTS_PER_SEARCH);
 
         // Computed once per target, over candidates that at least pass the
@@ -2025,7 +2040,12 @@ pub async fn fetch_candidates(
     let profile = load_quality_profile(conn, media_item.quality_profile_id, profile_kind)?;
 
     let mut sorted = items;
-    sorted.sort_by_key(|i| std::cmp::Reverse(i.seeders.unwrap_or(0)));
+    sorted.sort_by_key(|item| {
+        (
+            std::cmp::Reverse(release_matches_target(&target, item)),
+            std::cmp::Reverse(item.seeders.unwrap_or(0)),
+        )
+    });
     sorted.truncate(MAX_RESULTS_PER_SEARCH);
 
     let better_resolution_available = better_resolution_available(&target, &sorted);
@@ -3338,14 +3358,14 @@ mod tests {
     }
 
     #[test]
-    fn build_tv_query_is_title_only_for_tpb() {
-        // apibay's search returns zero results once a season/episode token
-        // is appended to a multi-word title, even when genuine matches for
-        // that exact episode exist under a plain title search; verified
-        // live against real show data.
+    fn build_tv_query_scopes_tpb_to_a_season_without_an_episode_token() {
         assert_eq!(
             build_tv_query("Some Show", 4, 13, SearchRoute::Tpb),
-            "Some Show"
+            "Some Show S04"
+        );
+        assert_eq!(
+            build_tv_query("Some Show", 4, 1, SearchRoute::Tpb),
+            build_tv_query("Some Show", 4, 13, SearchRoute::Tpb)
         );
     }
 
@@ -3741,6 +3761,35 @@ mod tests {
             scoring::evaluate_gates(&parsed, &ctx, &QualityProfile::default_tv()),
             scoring::GateResult::Accept
         );
+    }
+
+    #[test]
+    fn requested_episode_survives_the_search_result_cap() {
+        let target = tv_search_target(8, 1);
+        let mut items: Vec<_> = (0..MAX_RESULTS_PER_SEARCH)
+            .map(|_| raw_item("Some Show S01 Complete 1080p WEB-DL"))
+            .collect();
+        items.push(raw_item("Some Show S08E01 1080p WEB-DL"));
+        items.sort_by_key(|item| {
+            (
+                std::cmp::Reverse(release_matches_target(&target, item)),
+                release_sort_key(item),
+            )
+        });
+        items.truncate(MAX_RESULTS_PER_SEARCH);
+        assert_eq!(items[0].title, "Some Show S08E01 1080p WEB-DL");
+        assert!(release_matches_target(
+            &target,
+            &raw_item("Some Show S08 Complete 1080p")
+        ));
+        assert!(!release_matches_target(
+            &target,
+            &raw_item("Some Show S08E02 1080p")
+        ));
+        assert!(!release_matches_target(
+            &target,
+            &raw_item("Other Series S08E01 1080p")
+        ));
     }
 
     #[test]
