@@ -1,5 +1,5 @@
 [workspace]
-members = ["breadarr-shared", "breadarrd", "breadarr-tui"]
+members = ["breadarr-shared", "breadarrd", "breadarr-tui", "breadarr-mcp"]
 resolver = "2"
 
 [workspace.dependencies]

@@ -63,6 +63,18 @@ Install via bakery (`bakery install breadarr`) on a homelab host, or build from 
 - **Health**: daemon cycle outcomes plus the library-health report (see below), scrollable.
 - **Profiles**: quality-profile weight axes; open a profile and edit a weight in place.
 
+## MCP server
+
+`breadarr-mcp` is an MCP stdio server exposing `breadarrd`'s API to agents
+(21 tools: library search/detail, TVDB/TMDB catalog search, add series/movie,
+search-now, manual-picker candidates and grabs, review approve/reject,
+releases, stuck report, calendar, library health, daemon health, monitor
+toggles, and guarded `remove_media` which requires `confirm: true` and never
+touches files on disk). It reads the same config file for the daemon URL and
+API token, with `BREADARR_URL` / `BREADARR_API_TOKEN` env overrides. See
+`breadarr-mcp/README.md`. Shipped via bakery alongside `breadarrd` and
+`breadarr-tui`.
+
 ## Operational notes
 
 - `curl http://127.0.0.1:7879/health` is liveness-only (is the process up). Cycle outcomes live at `/health/detail` (requires `Authorization: Bearer <token>` when `daemon.api_token` is set).

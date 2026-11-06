@@ -1,6 +1,6 @@
 name = "breadarr"
 description = "Single-daemon Sonarr+Radarr+Prowlarr replacement: release watching, matching, grabbing, importing, and a terminal UI, no web UI"
-binaries = ["breadarrd", "breadarr-tui"]
+binaries = ["breadarrd", "breadarr-tui", "breadarr-mcp"]
 # mkvtoolnix-cli / ffmpeg: `mkvmerge` and `ffprobe`/`ffmpeg` are shelled out
 # to directly via Command::new() (breadarrd/src/importer/mkv.rs for the
 # audio-track remux fix; breadarrd/src/importer/ffprobe.rs and
