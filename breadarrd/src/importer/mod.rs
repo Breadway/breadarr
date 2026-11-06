@@ -1146,6 +1146,7 @@ fn upsert_probe(
     corruption_status: &str,
 ) -> Result<()> {
     let f = probe.map(ProbeFields::from_probe).unwrap_or_default();
+    let resolution_label = resolution_label(f.width, f.height);
 
     conn.execute(
         "INSERT INTO media_file_probe (
@@ -1210,7 +1211,39 @@ fn upsert_probe(
             f.non_eng_default,
         ],
     )?;
+
+    // Keep the denormalized copies on `episode_file` in step with the
+    // ground-truth probe. These columns were declared from the start but
+    // never written, so every imported file read back with `resolution` /
+    // `video_codec` / `audio_langs` NULL even though ffprobe knew the real
+    // values (ARR-16: the state that should have made a 480p import both
+    // observable and upgradeable was invisible). COALESCE keeps whatever
+    // was recorded before when a probe fails and produces no fields.
+    conn.execute(
+        "UPDATE episode_file
+            SET video_codec = COALESCE(?2, video_codec),
+                resolution = COALESCE(?3, resolution),
+                audio_langs = COALESCE(?4, audio_langs)
+          WHERE id = ?1",
+        params![
+            episode_file_id,
+            f.video_codec,
+            resolution_label,
+            f.audio_langs
+        ],
+    )?;
     Ok(())
+}
+
+/// Ground-truth display value for `episode_file.resolution`: exact probed
+/// pixel dimensions (`854x480`) when both are known, height alone
+/// (`480p`) when only that is, `None` otherwise.
+fn resolution_label(width: Option<i64>, height: Option<i64>) -> Option<String> {
+    match (width, height) {
+        (Some(width), Some(height)) => Some(format!("{width}x{height}")),
+        (None, Some(height)) => Some(format!("{height}p")),
+        _ => None,
+    }
 }
 
 /// Records the outcome of the expensive full-decode corruption check (see
@@ -2107,8 +2140,15 @@ fn import_one(
 
     let size_bytes = std::fs::metadata(&dest)?.len();
     conn.execute(
-        "INSERT INTO episode_file (episode_id, media_item_id, path, size_bytes, subtitle_status) VALUES (?1, ?2, ?3, ?4, 'none')",
-        params![episode_id, grab.media_item_id(), dest.to_string_lossy(), size_bytes],
+        "INSERT INTO episode_file (episode_id, media_item_id, path, size_bytes, quality_score, subtitle_status)
+         VALUES (?1, ?2, ?3, ?4, (SELECT score FROM release WHERE id = ?5), 'none')",
+        params![
+            episode_id,
+            grab.media_item_id(),
+            dest.to_string_lossy(),
+            size_bytes,
+            grab.release_id()
+        ],
     )?;
     let episode_file_id = conn.last_insert_rowid();
     if let Some(episode_id) = episode_id {
@@ -2519,8 +2559,8 @@ fn import_season_pack_file(
 
     let size_bytes = std::fs::metadata(&dest)?.len();
     conn.execute(
-        "INSERT INTO episode_file (episode_id, media_item_id, path, size_bytes, subtitle_status) VALUES (?1, ?2, ?3, ?4, 'none')",
-        params![episode_id, media_item_id, dest.to_string_lossy(), size_bytes],
+        "INSERT INTO episode_file (episode_id, media_item_id, path, size_bytes, quality_score, subtitle_status) VALUES (?1, ?2, ?3, ?4, ?5, 'none')",
+        params![episode_id, media_item_id, dest.to_string_lossy(), size_bytes, release_score],
     )?;
     let episode_file_id = conn.last_insert_rowid();
     conn.execute(
@@ -4277,8 +4317,8 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO release (id, media_item_id, episode_id, raw_title, source_id, guid, status, torrent_hash, grabbed_at)
-             VALUES (1, 1, NULL, 'Some.Movie.WEB.H264-GROUP', 1, 'guid-1', 'grabbed', 'deadbeef', datetime('now'))",
+            "INSERT INTO release (id, media_item_id, episode_id, raw_title, source_id, guid, score, status, torrent_hash, grabbed_at)
+             VALUES (1, 1, NULL, 'Some.Movie.WEB.H264-GROUP', 1, 'guid-1', 13.5, 'grabbed', 'deadbeef', datetime('now'))",
             [],
         )
         .unwrap();
@@ -4333,7 +4373,36 @@ mod tests {
             .unwrap();
         assert_eq!(quality_events, 1);
 
+        // The imported row's own quality state must be observable, not
+        // NULL: the release score and the probed dimensions are exactly
+        // what a later upgrade/quality review needs to compare against.
+        let (quality_score, resolution, video_codec): (
+            Option<f64>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT quality_score, resolution, video_codec FROM episode_file LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(quality_score, Some(13.5));
+        assert_eq!(resolution.as_deref(), Some("640x360"));
+        assert_eq!(video_codec.as_deref(), Some("h264"));
+
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolution_label_prefers_exact_dimensions_and_falls_back_to_height() {
+        assert_eq!(
+            resolution_label(Some(854), Some(480)).as_deref(),
+            Some("854x480")
+        );
+        assert_eq!(resolution_label(None, Some(480)).as_deref(), Some("480p"));
+        assert_eq!(resolution_label(Some(1920), None), None);
+        assert_eq!(resolution_label(None, None), None);
     }
 
     /// Generates a real mkv with two audio tracks: a non-English one
