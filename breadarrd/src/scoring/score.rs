@@ -2,6 +2,29 @@ use crate::parser::{Codec, ParsedRelease, Source};
 
 use super::profile::{ProfileKind, QualityProfile};
 
+/// Static, profile-free ordering of the quality axes `score` weights, for
+/// ranking a whole candidate batch *before* any item has been title-matched
+/// to a media item (and therefore before its profile is known). Highest is
+/// best; seeders are deliberately not part of this key because they are
+/// already the caller's tiebreaker and are not a quality axis.
+///
+/// Normal acquisition paths already compare full scores before grabbing.
+/// The RSS feed path is the exception: it sees a newest-first stream and
+/// used to act on the first item that resolved to a target, so a 480p
+/// release published one minute after an otherwise identical 1080p one won
+/// purely by arriving first (ARR-16: 480p scored 13.48 while the 1080p
+/// release in the same feed window scored 19.48).
+pub type QualityRank = (u8, u8, u8, bool);
+
+pub fn quality_rank(parsed: &ParsedRelease) -> QualityRank {
+    (
+        resolution_tier(parsed.resolution) as u8,
+        source_tier(parsed.source) as u8,
+        codec_tier(parsed.codec) as u8,
+        parsed.is_repack,
+    )
+}
+
 pub fn score(parsed: &ParsedRelease, seeders: u32, has_hdr: bool, profile: &QualityProfile) -> f32 {
     let w = &profile.weights;
     let mut total = 0.0;
@@ -173,6 +196,63 @@ mod tests {
 
         assert!(s1080 > s720);
         assert!(s720 > s480);
+    }
+
+    #[test]
+    fn reproduces_the_arr16_score_gap_between_the_feed_pair() {
+        // The recorded production grab scored 13.484907: 11 seeders,
+        // WEB-DL (x3), AVC/H264 (x2), no resolution credit for 480p. With
+        // the same seeders the 1080p release scores exactly 6 higher,
+        // more than the default 5.0 upgrade_min_score_gain.
+        let profile = QualityProfile::default_tv();
+        let p1080 = parser::parse(
+            "[Erai-raws] Dragon Ball Super: Beerus - 03 [1080p CR WEB-DL AVC AAC][A567B1A4]",
+        );
+        let p480 = parser::parse(
+            "[Erai-raws] Dragon Ball Super: Beerus - 03 [480p CR WEB-DL AVC AAC][A567B1A4]",
+        );
+        let s480 = score(&p480, 11, false, &profile);
+        let s1080 = score(&p1080, 11, false, &profile);
+        assert!((s480 - 13.484_907).abs() < 0.000_1, "got {s480}");
+        assert!((s1080 - s480 - 6.0).abs() < 0.000_1);
+    }
+
+    #[test]
+    fn quality_rank_orders_the_real_480p_1080p_feed_pair() {
+        // The exact release pair from ARR-16: the 1080p WEB-DL was
+        // published first, the 480p CR WEB-DL one minute later, so the
+        // feed lists the 480p first. Ranking must put the 1080p ahead of
+        // it regardless of arrival order.
+        let p1080 = parser::parse(
+            "[Erai-raws] Dragon Ball Super: Beerus - 03 [1080p CR WEB-DL AVC AAC][A567B1A4]",
+        );
+        let p480 = parser::parse(
+            "[Erai-raws] Dragon Ball Super: Beerus - 03 [480p CR WEB-DL AVC AAC][A567B1A4]",
+        );
+        assert_eq!(p1080.resolution, Some(1080));
+        assert_eq!(p480.resolution, Some(480));
+        assert!(quality_rank(&p1080) > quality_rank(&p480));
+    }
+
+    #[test]
+    fn quality_rank_breaks_ties_by_source_codec_then_repack() {
+        let bluray = parser::parse("Show S01E01 1080p BluRay H264");
+        let webdl = parser::parse("Show S01E01 1080p WEB-DL H264");
+        assert!(quality_rank(&bluray) > quality_rank(&webdl));
+
+        let hevc = parser::parse("Show S01E01 1080p WEB-DL HEVC");
+        assert!(quality_rank(&hevc) > quality_rank(&webdl));
+
+        let repack = parser::parse("Show S01E01 1080p WEB-DL H264 REPACK");
+        assert!(quality_rank(&repack) > quality_rank(&webdl));
+    }
+
+    #[test]
+    fn quality_rank_does_not_treat_an_unknown_resolution_as_1080p() {
+        let unknown = parser::parse("Some.Show.Without.Resolution");
+        let p1080 = parser::parse("Show S01E01 1080p WEB-DL H264");
+        assert_eq!(unknown.resolution, None);
+        assert!(quality_rank(&p1080) > quality_rank(&unknown));
     }
 
     #[test]

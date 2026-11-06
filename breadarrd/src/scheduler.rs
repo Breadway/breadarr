@@ -137,6 +137,32 @@ fn release_sort_key(item: &RawReleaseItem) -> (std::cmp::Reverse<bool>, std::cmp
     )
 }
 
+/// Orders a freshly fetched RSS feed batch so the best-quality candidate
+/// for each target is processed first. The feed arrives newest-first and
+/// only the first viable item for a given episode/movie can be grabbed;
+/// every later item for that same target is then either in flight or
+/// already satisfied. Without this ordering a 480p release published a
+/// minute after an otherwise equivalent 1080p WEB-DL wins purely by
+/// arriving first: exactly the ARR-16 grab (480p scored 13.48 while the
+/// 1080p release in the same feed window scored 19.48). Ties keep their
+/// original feed order (the sort is stable), with seeder count as the
+/// tiebreaker the weighted score itself uses.
+fn rank_feed_items(items: Vec<RawReleaseItem>) -> Vec<RawReleaseItem> {
+    let mut ranked: Vec<(scoring::QualityRank, u32, RawReleaseItem)> = items
+        .into_iter()
+        .map(|item| {
+            let parsed = parser::parse(&item.title);
+            (
+                scoring::quality_rank(&parsed),
+                item.seeders.unwrap_or(0),
+                item,
+            )
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    ranked.into_iter().map(|(_, _, item)| item).collect()
+}
+
 /// True when a release's raw title carries an explicit non-video format
 /// marker: an ebook, audiobook, or comic that happens to share a
 /// monitored show/movie's title text, not an actual episode or film. A
@@ -858,7 +884,7 @@ pub async fn run_grab_cycle(
     qbit: &QbitClient,
     qbit_category: &str,
 ) -> Result<GrabCycleStats> {
-    let items = source.fetch(None).await?;
+    let items = rank_feed_items(source.fetch(None).await?);
     let mut stats = GrabCycleStats {
         items_seen: items.len(),
         ..Default::default()
@@ -1269,16 +1295,6 @@ fn enumerate_search_targets(conn: &Connection, budget: usize) -> Result<Vec<Sear
     Ok(candidates.into_iter().map(|(t, _, _)| t).collect())
 }
 
-/// Upgrade-search counterpart to `enumerate_search_targets`: the mirror
-/// image query: `has_file = 1`/`EXISTS episode_file` instead of `= 0`/
-/// `NOT EXISTS`, joined against `upgrade_state` instead of `search_state`,
-/// enumerating up to `budget` monitored-and-already-owned items due for an
-/// upgrade check. Anime TV is excluded for the same reason as the
-/// missing-content path: it's covered by the nyaa RSS feed watch instead.
-/// Every target gets `upgrade_min_gain: Some(min_gain)`, which is what
-/// `process_item` uses both to bypass the normal `has_file` eligibility
-/// gates and to require a new candidate to beat the current file's score by
-/// more than a marginal amount (see `should_grab`).
 /// SQL fragment computing whether a file has any of the ground-truth
 /// `media_file_probe` problem signals worth prioritizing an upgrade check
 /// for: under-quality (probe-verified, not just what the release title
@@ -1298,8 +1314,19 @@ const NEEDS_ATTENTION_CLAUSE: &str = "(COALESCE(p.flag_under_quality, 0) = 1 \
 /// image query: `has_file = 1`/`EXISTS episode_file` instead of `= 0`/
 /// `NOT EXISTS`, joined against `upgrade_state` instead of `search_state`,
 /// enumerating up to `budget` monitored-and-already-owned items due for an
-/// upgrade check. Anime TV is excluded for the same reason as the
-/// missing-content path: it's covered by the nyaa RSS feed watch instead.
+/// upgrade check.
+///
+/// Anime TV is included only when a probe verifies a real problem
+/// (`NEEDS_ATTENTION_CLAUSE`), routed to Nyaa search the same way the manual
+/// per-media-item search already routes anime. Routine upgrade checks still
+/// skip clean anime files because acquisition is feed-driven, but that
+/// exclusion alone left a genuinely under-quality anime import with no
+/// recovery path: the feed watch ignores anything for an episode that
+/// already has a file, so a 480p import stayed 480p while a 1080p release
+/// and a 1080p REPACK were both available (ARR-16). The existing
+/// `upgrade_enabled` policy, budget and `upgrade_min_score_gain` threshold
+/// apply unchanged; this only makes flagged anime reach them.
+///
 /// Every target gets `upgrade_min_gain: Some(min_gain)`, which is what
 /// `process_item` uses both to bypass the normal `has_file` eligibility
 /// gates and to require a new candidate to beat the current file's score by
@@ -1320,7 +1347,8 @@ fn enumerate_upgrade_targets(
 
     let mut stmt = conn.prepare(&format!(
         "SELECT e.id, e.media_item_id, m.title, e.season_number, e.episode_number, e.air_date,
-                us.last_checked_at, {NEEDS_ATTENTION_CLAUSE} AS needs_attention
+                us.last_checked_at, {NEEDS_ATTENTION_CLAUSE} AS needs_attention,
+                EXISTS (SELECT 1 FROM anime_mapping am WHERE am.tvdb_id = m.tvdb_id) AS is_anime
          FROM episode e
          JOIN media_item m ON m.id = e.media_item_id
          LEFT JOIN upgrade_state us ON us.episode_id = e.id
@@ -1328,11 +1356,18 @@ fn enumerate_upgrade_targets(
          LEFT JOIN media_file_probe p ON p.episode_file_id = ef.id
          WHERE m.monitored = 1 AND m.kind = 'series'
            AND e.monitored = 1 AND e.has_file = 1
-           AND (m.tvdb_id IS NULL OR m.tvdb_id NOT IN
-                (SELECT tvdb_id FROM anime_mapping WHERE tvdb_id IS NOT NULL))
            AND NOT EXISTS (SELECT 1 FROM release r WHERE r.episode_id = e.id
                            AND r.status IN ('grabbed','downloading'))
            AND (ef.upgrade_locked IS NULL OR ef.upgrade_locked = 0)
+           -- Anime TV stays out of routine upgrade checks (the feed watch
+           -- covers new releases; repeated searches don't), but a
+           -- probe-flagged problem is exactly the case the feed watch
+           -- cannot recover: it ignores anything for an episode that
+           -- already has a file. Let those files through so the existing
+           -- upgrade machinery can replace them (ARR-16).
+           AND ((m.tvdb_id IS NULL OR m.tvdb_id NOT IN
+                 (SELECT tvdb_id FROM anime_mapping WHERE tvdb_id IS NOT NULL))
+                OR {NEEDS_ATTENTION_CLAUSE})
            AND (us.last_checked_at IS NULL OR {})",
         UPGRADE_DUE_CLAUSE
             .replace("last_checked_at", "us.last_checked_at")
@@ -1346,6 +1381,7 @@ fn enumerate_upgrade_targets(
         episode: i64,
         last_checked_at: Option<String>,
         needs_attention: bool,
+        is_anime: bool,
     }
     let rows: Vec<EpisodeCandidateRow> = stmt
         .query_map([], |row| {
@@ -1357,6 +1393,7 @@ fn enumerate_upgrade_targets(
                 episode: row.get(4)?,
                 last_checked_at: row.get(6)?,
                 needs_attention: row.get(7)?,
+                is_anime: row.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -1368,17 +1405,23 @@ fn enumerate_upgrade_targets(
         episode,
         last_checked_at,
         needs_attention,
+        is_anime,
     } in rows
     {
+        let route = if is_anime {
+            SearchRoute::NyaaSearch
+        } else {
+            SearchRoute::Tpb
+        };
         candidates.push((
             SearchTarget {
                 media_item_id,
                 episode_id: Some(episode_id),
                 season_number: Some(season as u32),
                 episode_number: Some(episode as u32),
-                query: build_tv_query(&title, season, episode, SearchRoute::Tpb),
+                query: build_tv_query(&title, season, episode, route),
                 title_words: significant_words(&title),
-                route: SearchRoute::Tpb,
+                route,
                 upgrade_min_gain: Some(min_gain),
             },
             needs_attention,
@@ -2745,6 +2788,187 @@ mod tests {
         let targets = enumerate_upgrade_targets(&conn, 10, 5.0).unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].episode_id, Some(1));
+    }
+
+    #[test]
+    fn rank_feed_items_puts_the_1080p_ahead_of_a_later_480p_in_the_same_feed() {
+        // Exact ARR-16 shape: the feed is newest-first, so the 480p (the
+        // later publication) is listed first. Ranking is what stops the
+        // grab loop from acting on it before the 1080p is even considered.
+        let item = |title: &str, guid: &str| RawReleaseItem {
+            title: title.to_string(),
+            link: format!("magnet:?xt=urn:btih:{guid}"),
+            guid: guid.to_string(),
+            size_bytes: Some(200_000_000),
+            seeders: Some(11),
+            leechers: Some(1),
+        };
+        let p480 = item(
+            "[Erai-raws] Dragon Ball Super: Beerus - 03 [480p CR WEB-DL AVC AAC][A567B1A4]",
+            "480",
+        );
+        let p1080 = item(
+            "[Erai-raws] Dragon Ball Super: Beerus - 03 [1080p CR WEB-DL AVC AAC][A567B1A4]",
+            "1080",
+        );
+
+        let ranked = rank_feed_items(vec![p480, p1080.clone()]);
+        assert_eq!(ranked[0].guid, "1080");
+        assert_eq!(ranked[1].guid, "480");
+        assert_eq!(ranked[0].title, p1080.title);
+    }
+
+    #[test]
+    fn rank_feed_items_keeps_feed_order_for_equal_quality_and_seeders() {
+        let item = |title: &str, guid: &str, seeders: u32| RawReleaseItem {
+            title: title.to_string(),
+            link: format!("magnet:?xt=urn:btih:{guid}"),
+            guid: guid.to_string(),
+            size_bytes: None,
+            seeders: Some(seeders),
+            leechers: None,
+        };
+        let first = item("Show S01E01 1080p WEB-DL H264", "first", 10);
+        let second = item("Show S01E01 1080p WEB-DL H264", "second", 10);
+        let ranked = rank_feed_items(vec![first, second]);
+        assert_eq!(ranked[0].guid, "first");
+        assert_eq!(ranked[1].guid, "second");
+    }
+
+    #[test]
+    fn rank_feed_items_uses_seeders_only_within_the_same_quality() {
+        let item = |title: &str, guid: &str, seeders: u32| RawReleaseItem {
+            title: title.to_string(),
+            link: format!("magnet:?xt=urn:btih:{guid}"),
+            guid: guid.to_string(),
+            size_bytes: None,
+            seeders: Some(seeders),
+            leechers: None,
+        };
+        // A far better-seeded 480p must still sort behind a 1080p.
+        let p480 = item("Show S01E01 480p WEB-DL H264", "480", 5000);
+        let p1080 = item("Show S01E01 1080p WEB-DL H264", "1080", 4);
+        let ranked = rank_feed_items(vec![p480, p1080]);
+        assert_eq!(ranked[0].guid, "1080");
+    }
+
+    #[test]
+    fn enumerate_upgrade_targets_includes_a_flagged_anime_episode_via_nyaa_search() {
+        // An anime episode with a file used to be excluded from the upgrade
+        // loop entirely, so a probe-flagged under-quality import had no
+        // path to replacement. It must now be enumerated, routed to the
+        // nyaa search the manual path already uses for anime.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_item (id, kind, title, tvdb_id, monitored, quality_profile_id, root_folder)
+             VALUES (1, 'series', 'Some Anime', 999, 1, 1, '/tmp')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO anime_mapping (anidb_id, tvdb_id) VALUES (1, 999)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file)
+             VALUES (1, 1, 1, 3, 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO episode_file (id, episode_id, media_item_id, path, size_bytes, subtitle_status)
+             VALUES (1, 1, 1, '/tmp/s01e03.mkv', 100, 'none')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO media_file_probe (episode_file_id, probed_at, probe_size_bytes, probe_mtime, corruption_status, flag_under_quality)
+             VALUES (1, datetime('now'), 100, 0, 'probe_ok', 1)",
+            [],
+        )
+        .unwrap();
+
+        let targets = enumerate_upgrade_targets(&conn, 10, 5.0).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].episode_id, Some(1));
+        assert_eq!(targets[0].route, SearchRoute::NyaaSearch);
+        assert_eq!(targets[0].upgrade_min_gain, Some(5.0));
+        assert_eq!(targets[0].query, "Some Anime S01");
+    }
+
+    #[test]
+    fn enumerate_upgrade_targets_keeps_clean_anime_out_of_routine_checks() {
+        // Only probe-flagged anime gets pulled into the upgrade loop; a
+        // clean anime file stays covered solely by the feed watch, exactly
+        // as before.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_item (id, kind, title, tvdb_id, monitored, quality_profile_id, root_folder)
+             VALUES (1, 'series', 'Some Anime', 999, 1, 1, '/tmp')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO anime_mapping (anidb_id, tvdb_id) VALUES (1, 999)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO episode (id, media_item_id, season_number, episode_number, monitored, has_file)
+             VALUES (1, 1, 1, 3, 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO episode_file (id, episode_id, media_item_id, path, size_bytes, subtitle_status)
+             VALUES (1, 1, 1, '/tmp/s01e03.mkv', 100, 'none')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO media_file_probe (episode_file_id, probed_at, probe_size_bytes, probe_mtime, corruption_status)
+             VALUES (1, datetime('now'), 100, 0, 'probe_ok')",
+            [],
+        )
+        .unwrap();
+
+        assert!(enumerate_upgrade_targets(&conn, 10, 5.0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_1080p_release_clears_the_default_upgrade_gain_over_an_imported_480p() {
+        // End-to-end shape of the upgrade half of ARR-16: the release row
+        // recorded the imported 480p at 13.484907. The 1080p WEB-DL for
+        // the same episode, same seeders, scores 6 higher, which clears
+        // the default 5.0 upgrade_min_score_gain; the 480p itself never
+        // does.
+        let profile = crate::scoring::QualityProfile::default_tv();
+        let p1080 = parser::parse(
+            "[Erai-raws] Dragon Ball Super: Beerus - 03 [1080p CR WEB-DL AVC AAC][A567B1A4]",
+        );
+        let p480 = parser::parse(
+            "[Erai-raws] Dragon Ball Super: Beerus - 03 [480p CR WEB-DL AVC AAC][A567B1A4]",
+        );
+        let imported_480 = crate::scoring::score(&p480, 11, false, &profile);
+        let candidate_1080 = crate::scoring::score(&p1080, 11, false, &profile);
+        let default_min_gain = 5.0;
+        assert!(should_grab(
+            candidate_1080,
+            false,
+            Some(imported_480),
+            default_min_gain
+        ));
+        assert!(!should_grab(
+            imported_480,
+            false,
+            Some(imported_480),
+            default_min_gain
+        ));
     }
 
     #[test]
