@@ -19,6 +19,7 @@ pub struct RawReleaseItem {
     pub leechers: Option<u32>,
 }
 
+#[allow(clippy::double_must_use)] // async_trait boxes the future, which is already must_use
 #[async_trait]
 pub trait ReleaseSource {
     /// Fetch current candidate releases. `query` is used by search-driven
