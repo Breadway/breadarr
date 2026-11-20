@@ -74,14 +74,30 @@ if [ ! -d "${OLD_GLIBC_CACHE}/usr/lib" ]; then
     tar --zstd -xf /tmp/old-gcc-libs.pkg.tar.zst -C "${OLD_GLIBC_CACHE}"
     rm -f /tmp/old-glibc.pkg.tar.zst /tmp/old-gcc-libs.pkg.tar.zst
 fi
-# The shared build script only bind-mounts $ROOT (as /workspace) into the
-# container, not arbitrary host paths, so the cached sysroot has to be
-# copied under $ROOT to be visible there. The download above is cached
-# persistently in /tmp across runs; this copy is just a fast local `cp`.
+# The shared build script bind-mounts $ROOT's parent (as /workspace) into
+# the container and runs with $ROOT as the working directory, not an
+# arbitrary host path, so the cached sysroot has to be copied under $ROOT
+# to be visible there. The download above is cached persistently in /tmp
+# across runs; this copy is just a fast local `cp`.
 rm -rf "${ROOT}/.ci-old-glibc"
 cp -a "${OLD_GLIBC_CACHE}" "${ROOT}/.ci-old-glibc"
 
 bash "${CACHE_DIR}/ci/build.sh" breadarr "$ROOT" sh -c '
-    RUSTFLAGS="-C link-arg=--sysroot=/workspace/.ci-old-glibc -C link-arg=-L/workspace/.ci-old-glibc/usr/lib" \
+    RUSTFLAGS="-C link-arg=--sysroot=${PWD}/.ci-old-glibc -C link-arg=-L${PWD}/.ci-old-glibc/usr/lib" \
     exec "$@"
 ' sh "$@"
+
+# A missing or stale sysroot path fails silently: the link succeeds against
+# the container's newer glibc and only breaks at runtime on hestia. Check
+# the artifacts here so a build that requires a newer glibc never reaches
+# /srv/breadway-dl.
+for bin in breadarrd breadarr-tui; do
+    [ -f "${ROOT}/target/release/${bin}" ] || continue
+    GLIBC_MAX="$(objdump -T "${ROOT}/target/release/${bin}" 2>/dev/null \
+        | grep -o 'GLIBC_[0-9.]*' | sed 's/^GLIBC_//' | sort -V | tail -1 || true)"
+    if [ -n "${GLIBC_MAX}" ] \
+        && [ "$(printf '%s\n' 2.39 "${GLIBC_MAX}" | sort -V | tail -1)" != "2.39" ]; then
+        echo "error: ${bin} requires GLIBC_${GLIBC_MAX}; hestia runs glibc 2.39" >&2
+        exit 1
+    fi
+done
