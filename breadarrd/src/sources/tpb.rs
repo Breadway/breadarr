@@ -27,6 +27,18 @@ struct TpbResult {
     size: String,
 }
 
+/// apibay's q.php needs an explicit `cat=0` (all categories). Without it,
+/// a multi-word query (every movie title plus year, every season-scoped TV
+/// query) returns the "No results returned" sentinel even when matches
+/// exist: verified 2026-11-20, `?q=VisionQuest%20S01` returned the sentinel
+/// while `?q=VisionQuest%20S01&cat=0` returned 10 real results, and the
+/// same held for `?q=Arrival%202016`. The client used to omit `cat`, so
+/// those searches silently recorded `no_results` and backed off instead of
+/// grabbing anything.
+fn search_url(api_url: &str, query: &str) -> String {
+    format!("{}?q={}&cat=0", api_url, urlencode(query))
+}
+
 impl TpbSource {
     pub fn new(api_url: impl Into<String>) -> Self {
         Self {
@@ -50,7 +62,7 @@ impl ReleaseSource for TpbSource {
                 "TpbSource requires a search query (this is a search-driven source, not a feed)"
             );
         };
-        let url = format!("{}?q={}", self.api_url, urlencode(query));
+        let url = search_url(&self.api_url, query);
         let results: Vec<TpbResult> = self
             .client
             .get(&url)
@@ -92,6 +104,18 @@ impl ReleaseSource for TpbSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_url_always_asks_for_all_categories() {
+        assert_eq!(
+            search_url("https://apibay.org/q.php", "VisionQuest S01"),
+            "https://apibay.org/q.php?q=VisionQuest%20S01&cat=0"
+        );
+        assert_eq!(
+            search_url("https://apibay.org/q.php", "Arrival 2016"),
+            "https://apibay.org/q.php?q=Arrival%202016&cat=0"
+        );
+    }
 
     #[test]
     fn build_magnet_includes_hash_name_and_trackers() {
