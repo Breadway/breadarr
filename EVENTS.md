@@ -1,4 +1,4 @@
-# breadarr: bread event integration
+# arr: bread event integration
 
 breadarr is a standalone media library manager: it works exactly the same
 with or without `breadd` running. The app id `arr` is registered in the
